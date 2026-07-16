@@ -1,6 +1,0 @@
-# action.yml
-name: 'PlatformIO Build'
-description: 'Compile using PlatformIO'
-runs:
-  using: 'docker'
-  image: 'Dockerfile'
