@@ -1,0 +1,14 @@
+# This file help to add generic board entry.
+# upload.maximum_size and product_line have to be verified
+# and changed if needed.
+# See: https://github.com/stm32duino/Arduino_Core_STM32/wiki/Add-a-new-variant-%28board%29
+
+# Generic WBA50KGUx
+GenWBA.menu.pnum.GENERIC_WBA50KGUX=Generic WBA50KGUx
+GenWBA.menu.pnum.GENERIC_WBA50KGUX.upload.maximum_size=1048576
+GenWBA.menu.pnum.GENERIC_WBA50KGUX.upload.maximum_data_size=65536
+GenWBA.menu.pnum.GENERIC_WBA50KGUX.build.board=GENERIC_WBA50KGUX
+GenWBA.menu.pnum.GENERIC_WBA50KGUX.build.product_line=STM32WBA50xx
+GenWBA.menu.pnum.GENERIC_WBA50KGUX.build.variant=STM32WBAxx/WBA50KGU
+GenWBA.menu.pnum.GENERIC_WBA50KGUX.debug.svd_file={runtime.tools.STM32_SVD.path}/svd/STM32WBAxx/STM32WBA50.svd
+

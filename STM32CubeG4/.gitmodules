@@ -1,0 +1,72 @@
+[submodule "Drivers/STM32G4xx_HAL_Driver"]
+	path = Drivers/STM32G4xx_HAL_Driver
+	url = https://github.com/STMicroelectronics/stm32g4xx_hal_driver.git
+	branch = master
+[submodule "Drivers/CMSIS/Device/ST/STM32G4xx"]
+	path = Drivers/CMSIS/Device/ST/STM32G4xx
+	url = https://github.com/STMicroelectronics/cmsis_device_g4.git
+	branch = master
+[submodule "Drivers/BSP/B-G474E-DPOW1"]
+	path = Drivers/BSP/B-G474E-DPOW1
+	url = https://github.com/STMicroelectronics/b-g474e-dpow1-bsp.git
+	branch = main
+[submodule "Drivers/BSP/STM32G4xx_Nucleo"]
+	path = Drivers/BSP/STM32G4xx_Nucleo
+	url = https://github.com/STMicroelectronics/stm32g4xx-nucleo-bsp.git
+	branch = main
+[submodule "Drivers/BSP/STM32G474E-EVAL"]
+	path = Drivers/BSP/STM32G474E-EVAL
+	url = https://github.com/STMicroelectronics/stm32g474e-eval-bsp.git
+	branch = main
+[submodule "Drivers/BSP/Components/Common"]
+	path = Drivers/BSP/Components/Common
+	url = https://github.com/STMicroelectronics/stm32-bsp-common.git
+	branch = main
+[submodule "Drivers/BSP/Components/hx8347d"]
+	path = Drivers/BSP/Components/hx8347d
+	url = https://github.com/STMicroelectronics/stm32-hx8347d.git
+	branch = main
+[submodule "Drivers/BSP/Components/mfxstm32l152"]
+	path = Drivers/BSP/Components/mfxstm32l152
+	url = https://github.com/STMicroelectronics/stm32-mfxstm32l152.git
+	branch = main
+[submodule "Drivers/BSP/Components/mt25ql512abb"]
+	path = Drivers/BSP/Components/mt25ql512abb
+	url = https://github.com/STMicroelectronics/stm32-mt25ql512abb.git
+	branch = main
+[submodule "Drivers/BSP/Components/stts751"]
+	path = Drivers/BSP/Components/stts751
+	url = https://github.com/STMicroelectronics/stm32-stts751.git
+	branch = main
+[submodule "Drivers/BSP/Components/st7735"]
+	path = Drivers/BSP/Components/st7735
+	url = https://github.com/STMicroelectronics/stm32-st7735.git
+	branch = main
+[submodule "Drivers/BSP/Components/wm8994"]
+	path = Drivers/BSP/Components/wm8994
+	url = https://github.com/STMicroelectronics/stm32-wm8994.git
+	branch = main
+[submodule "Middlewares/Third_Party/FatFs"]
+	path = Middlewares/Third_Party/FatFs
+	url = https://github.com/STMicroelectronics/stm32-mw-fatfs
+	branch = master
+[submodule "Middlewares/Third_Party/FreeRTOS"]
+	path = Middlewares/Third_Party/FreeRTOS
+	url = https://github.com/STMicroelectronics/stm32-mw-freertos
+	branch = master
+[submodule "Middlewares/ST/OpenBootloader"]
+	path = Middlewares/ST/OpenBootloader
+	url = https://github.com/STMicroelectronics/stm32-mw-openbl
+	branch = main
+[submodule "Middlewares/ST/STM32_USB_Device_Library"]
+	path = Middlewares/ST/STM32_USB_Device_Library
+	url = https://github.com/STMicroelectronics/stm32-mw-usb-device
+	branch = master
+[submodule "Middlewares/ST/STM32_USBPD_Library/Core"]
+	path = Middlewares/ST/STM32_USBPD_Library/Core
+	url = https://github.com/STMicroelectronics/stm32-mw-usbpd-core
+	branch = main
+[submodule "Middlewares/ST/STM32_USBPD_Library/Devices/STM32G4XX"]
+	path = Middlewares/ST/STM32_USBPD_Library/Devices/STM32G4XX
+	url = https://github.com/STMicroelectronics/stm32-mw-usbpd-device-g4
+	branch = main

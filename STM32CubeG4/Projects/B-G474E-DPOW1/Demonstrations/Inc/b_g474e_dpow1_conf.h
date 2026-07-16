@@ -1,0 +1,76 @@
+/**
+  ******************************************************************************
+  * @file    b_g474e_dpow1_conf.h
+  * @author  MCD Application Team
+  * @brief   B-G474E-DPOW1 board configuration file.
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2019 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+
+/* Define to prevent recursive inclusion -------------------------------------*/
+#ifndef B_G474E_DPOW1_CONF_H
+#define B_G474E_DPOW1_CONF_H
+
+#ifdef __cplusplus
+ extern "C" {
+#endif
+
+/* Includes ------------------------------------------------------------------*/
+#include "stm32g4xx_hal.h"
+/** @addtogroup BSP
+  * @{
+  */
+
+/** @addtogroup B-G474E-DPOW1
+  * @{
+  */
+
+/** @defgroup B-G474E-DPOW1_CONFIG Config
+  * @{
+  */
+
+/** @defgroup B-G474E-DPOW1_CONFIG_Exported_Constants Exported Constants
+  * @{
+  */
+
+/* COM define */
+#define USE_BSP_COM_FEATURE                 1U
+
+/* COM LOG define */
+#define USE_COM_LOG                         0U
+
+/* IRQ priorities */
+#define BSP_JOY_SEL_IT_PRIORITY            15U
+
+/**
+  * @}
+  */
+
+/**
+  * @}
+  */
+
+/**
+  * @}
+  */
+
+/**
+  * @}
+  */
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* B_G474E_DPOW1_CONF_H */
+
+

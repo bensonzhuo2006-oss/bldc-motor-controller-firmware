@@ -1,0 +1,97 @@
+/*
+  Copyright (c) 2011-2012 Arduino.  All right reserved.
+
+  This library is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License as published by the Free Software Foundation; either
+  version 2.1 of the License, or (at your option) any later version.
+
+  This library is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+  See the GNU Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+
+#include "Arduino.h"
+
+#include "PinAF_STM32F1.h"
+#include "interrupt.h"
+
+#if !defined(HAL_EXTI_MODULE_DISABLED)
+void attachInterrupt(pin_size_t interruptNumber, callback_function_t callback, PinStatus mode)
+{
+  uint32_t it_mode;
+  PinName p = digitalPinToPinName(interruptNumber);
+
+  switch (mode) {
+    case CHANGE :
+#if defined(GPIO_MODE_IT_RISING_FALLING)
+      it_mode = GPIO_MODE_IT_RISING_FALLING;
+#else
+      it_mode = HAL_EXTI_TRIGGER_RISING_FALLING;
+#endif
+      break;
+    case LOW :
+#ifdef GPIO_MODE_IT_LEVEL_LOW
+      it_mode = GPIO_MODE_IT_LEVEL_LOW;
+      break;
+#endif
+    case FALLING :
+#if defined(GPIO_MODE_IT_FALLING)
+      it_mode = GPIO_MODE_IT_FALLING;
+#else
+      it_mode = HAL_EXTI_TRIGGER_FALLING;
+#endif
+      break;
+    case HIGH :
+#ifdef GPIO_MODE_IT_LEVEL_HIGH
+      it_mode = GPIO_MODE_IT_LEVEL_HIGH;
+      break;
+#endif
+    default:
+    case RISING :
+#if defined(GPIO_MODE_IT_RISING)
+      it_mode = GPIO_MODE_IT_RISING;
+#else
+      it_mode = HAL_EXTI_TRIGGER_RISING;
+#endif
+      break;
+  }
+
+#ifdef STM32F1xx
+  pinF1_DisconnectDebug(p);
+#endif /* STM32F1xx */
+
+  stm32_interrupt_enable(p, callback, it_mode);
+}
+#endif
+void attachInterrupt(pin_size_t interruptNumber, voidFuncPtr callback, PinStatus mode)
+{
+#if !defined(HAL_EXTI_MODULE_DISABLED)
+  callback_function_t _c = callback;
+  attachInterrupt(interruptNumber, _c, mode);
+#else
+  (void)interruptNumber;
+  (void)callback;
+  (void)mode;
+#endif
+}
+
+void detachInterrupt(pin_size_t interruptNumber)
+{
+#if !defined(HAL_EXTI_MODULE_DISABLED)
+  PinName p = digitalPinToPinName(interruptNumber);
+  GPIO_TypeDef *port = get_GPIO_Port(STM_PORT(p));
+  if (!port) {
+    return;
+  }
+  stm32_interrupt_disable(port, STM_GPIO_PIN(p));
+#else
+  (void)interruptNumber;
+#endif
+}
