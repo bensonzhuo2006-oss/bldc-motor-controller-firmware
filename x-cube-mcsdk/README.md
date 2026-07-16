@@ -1,0 +1,1 @@
+Code for Benson and Natsu's 3-phase BLDC motor controller using STMicroelectronic's official motor control software development kit
