@@ -1,0 +1,40 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug (OpenOCD + SWO)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "openocd",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/Motor_Controller.elf",
+            "device": "STM32G491RE",
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "none",
+            "serverpath": "C:/ST/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.openocd.win32_2.4.400.202601091506/tools/bin/openocd.exe",
+            "searchDir": [
+                "C:/ST/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.debug.openocd_2.3.300.202602021527/resources/openocd/st_scripts"
+            ],
+            "configFiles": [
+                "interface/stlink-dap.cfg",
+                "target/stm32g4x.cfg"
+            ],
+            "gdbPath": "C:/Users/benso/AppData/Local/stm32cube/bundles/gnu-gdb-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gdb.exe",
+            "svdFile": "C:/ST/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.productdb.debug_2.2.400.202601091600/resources/cmsis/STMicroelectronics_CMSIS_SVD/STM32G491.svd",
+            "swoConfig": {
+                "enabled": true,
+                "cpuFrequency": 170000000,
+                "swoFrequency": 2000000,
+                "source": "probe",
+                "decoders": [
+                    {
+                        "type": "console",
+                        "label": "SWO",
+                        "port": 0,
+                        "encoding": "ascii"
+                    }
+                ]
+            }
+        }
+    ]
+}
