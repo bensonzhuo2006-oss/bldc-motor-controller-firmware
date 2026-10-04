@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/app.c
     App/debug.c
     App/mt6701.c
+    App/power.c
 )
 
 # Add include paths

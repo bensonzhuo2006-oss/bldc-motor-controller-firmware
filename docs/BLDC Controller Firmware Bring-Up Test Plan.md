@@ -640,3 +640,29 @@ Dated record of findings, decisions and measured results, newest last. Each entr
 - **Checks and counters:** SPI timeouts, CRC errors, field too strong, field too weak (or the reserved code), loss of track, angle jumps. A jump is a step larger than 1,500 rpm allows per sample (409 counts at 1 kHz, minimum 64); 1,500 rpm is about twice the motor's 730 rpm no-load speed. A bad sample doesn't update position or speed. "Healthy" = good sample, field normal, no loss of track. Disarming on encoder faults comes in Stage 9.
 - **Position and speed:** multi-turn by unwrapping (turn count ±1 on wrap). Speed from a second-order PLL in mechanical rad/s, critically damped, 50 Hz natural frequency (Kp = 2ωn, Ki = ωn²).
 - **Stage 1 test mode:** read at 1 kHz in the main loop. PA3 is high during each read (scope trigger). PA2 shows the angle as a 0–3.3 V sawtooth per turn. LED4 1 Hz heartbeat. SWO: `ENC spi1 ... OK` and `ENC first raw=... crc=OK field=NORMAL` at boot; `ENC field=`, `ENC loss_of_track=` and `ENC push=` on change; status line every 200 ms: `ENC a= turns= rpm= ok= crc= jump= to= strong= weak= lot= rd_us=`.
+
+### 2026-10-04: Stage 1 first run (SWO log, t = 30–55 s)
+
+- **Link and decode good:** crc = 0, jump = 0, to = 0, strong = weak = lot = 0 throughout, while the shaft was turned by hand through several turns in both directions. CRC-6 with initial value 0 and SPI mode 1 confirmed by zero CRC errors (no mode 2 fallback needed).
+- **Unwrapping good:** wraps counted correctly both ways (e.g. a 723 → 16166 gave turns 0 → −1; a 15725 → 23 gave turns −2 → −1). Hand-turning speeds read 20–75 rpm.
+- **Noise at rest:** the angle holds within 1–2 counts when still (e.g. 6745–6746, 2765–2767).
+- **Read time longer than estimated:** `rd_us` = 16 µs against about 5 µs expected (24 bits at 5.3 MHz = 4.5 µs plus 0.4 µs of CS waits). This is probably the -O0 Debug build (CRC loop, float PLL, volatile state) on top of the SPI time. To check: scope the CSN-low time against the PA3-high time. It doesn't block Stage 1, but it matters when the read moves into the 20 kHz control interrupt (50 µs budget). Revisit then.
+- **Main-loop tick:** `task_max_us` = 803–813 µs, set by the ENC SWO line (about 110 characters at 2 MHz SWO, written inside the tick). It fits within the 1 ms tick; the catch-up loop keeps reads at 1 kHz on average.
+- **Boot lines good:** all Stage 0 checks still OK at stage 1, plus `ENC spi1 mode1 12bit div32 OK` and `ENC first raw=0xF5802F a=15712 st=0x0 crc=OK field=NORMAL lot=0`. Hand decode of 0xF5802F agrees: angle = word >> 10 = 15712, status = (word >> 6) & 0xF = 0, CRC = 0x2F. `CYC 10ms=1852968` (10.9 ms) is inside the 10–11 ms that `HAL_Delay(10)` can take.
+- **Still to confirm:** the PA2 sawtooth, the SSI frame on the scope, the 90° ≈ 4,096-count check, one full minute with crc = 0, and which physical direction makes the count rise.
+
+### 2026-10-04: Stage 1 passed (developer's call)
+
+- PA3 measured 1 kHz, as expected (one pulse per 1 ms encoder read). PA2 angle output works (the developer first saw nothing, then confirmed it after checking the DC level while turning).
+- The developer moved on to Stage 2. **Not confirmed:** the SSI frame on the scope (CSN-low time against the 16 µs read time), the 90° ≈ 4,096-count check, a full minute of crc = 0 (about 25 s seen), and the physical direction of rising count. Stage 10 detects direction by itself. The read-time question comes back when the read moves into the control interrupt.
+- [x] Stage 1 prerequisite (encoder MODE pin, magnet checks) treated as done, since the encoder works with clean field status.
+
+### 2026-10-04: Stage 2 firmware written (not yet built or tested)
+
+- **Files:** `App/power.c/h` (new), `App/debug.c/h` (`debug_log_reset_cause()`), `App/app.c` (restructured: the encoder now updates every tick from Stage 1 onward, the power module from Stage 2 onward, and each stage's test mode is separate), `App/app_config.h` (`BRINGUP_STAGE 2`), `CMakeLists.txt` (adds `power.c`).
+- **VM\_SENSE:** ADC1 regular channel 14 (PB11), calibrated (single-ended) and enabled at boot, then four conversions averaged every 1 ms tick by direct register polling (no HAL). The polling avoids conflicting with the HAL handle once injected conversions start in Stage 7. VM = code × 3.3 / 4096 × 19, assuming VDDA = 3.3 V. Schematic: 180k / 10k divider (designators unreadable in the screenshot) with **C26 100 nF** across the 10k (τ ≈ 0.95 ms). C26 supplies the ADC's sampling charge, so CubeMX's 2.5-cycle sampling time is adequate. ADC clock = HCLK / 4 = 42.5 MHz (synchronous).
+- **MOTOR\_EN:** PC1, debounced 5 ms.
+- **State machine:** as in the plan, with these details. VM\_SETTLING needs MOTOR\_EN high and VM ≥ 10 V continuously for 20 ms, otherwise it goes back to NO\_VM. VM\_OK drops to NO\_VM on MOTOR\_EN low or VM < 9 V. It always starts in NO\_VM at boot.
+- **Reset cause:** RCC\_CSR decoded and printed at boot, then cleared (RMVF). BORRSTF is reported as power-on/brownout. PINRSTF accompanies every reset, so "PIN" is reported only when nothing else is set. A reset from the debugger shows SOFTWARE or PIN, not power-on.
+- **LED4:** NO\_VM blinks at 1 Hz, VM\_SETTLING at 5 Hz, VM\_OK is steady on.
+- **Stage 2 test mode:** `PWR` status line every 500 ms; state changes logged immediately. On each raw MOTOR\_EN rising edge, VM is captured every 1 ms for 500 ms, then printed every 10 ms (`RAMP t= vm_mv=`) with a summary `RAMP sw1_on->10V=…ms sw1_on->VM_OK=…ms`.

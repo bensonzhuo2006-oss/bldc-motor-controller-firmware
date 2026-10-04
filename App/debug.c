@@ -51,6 +51,29 @@ void debug_log(const char *fmt, ...)
   (void)ITM_SendChar('\n');
 }
 
+/* ---- Reset cause ---------------------------------------------------------- */
+
+/* RCC_CSR reset flags (RM0440 RCC_CSR). Every reset also pulses NRST, so
+ * PINRSTF is set alongside the real cause; it's reported as the cause only
+ * when nothing else is set. A power-on sets BORRSTF (no separate POR flag). */
+void debug_log_reset_cause(void)
+{
+  uint32_t csr = RCC->CSR;
+  const char *cause;
+
+  if ((csr & RCC_CSR_BORRSTF) != 0U)       { cause = "POWER_ON_OR_BROWNOUT"; }
+  else if ((csr & RCC_CSR_IWDGRSTF) != 0U) { cause = "IWDG"; }
+  else if ((csr & RCC_CSR_WWDGRSTF) != 0U) { cause = "WWDG"; }
+  else if ((csr & RCC_CSR_SFTRSTF) != 0U)  { cause = "SOFTWARE"; }
+  else if ((csr & RCC_CSR_LPWRRSTF) != 0U) { cause = "LOW_POWER"; }
+  else if ((csr & RCC_CSR_OBLRSTF) != 0U)  { cause = "OPTION_BYTE"; }
+  else if ((csr & RCC_CSR_PINRSTF) != 0U)  { cause = "PIN"; }
+  else                                     { cause = "NONE"; }
+
+  debug_log("RESET cause=%s csr=0x%08lX", cause, csr);
+  RCC->CSR |= RCC_CSR_RMVF;
+}
+
 /* ---- Init ----------------------------------------------------------------- */
 
 bool debug_init(void)
