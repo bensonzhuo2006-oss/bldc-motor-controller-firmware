@@ -709,3 +709,16 @@ Dated record of findings, decisions and measured results, newest last. Each entr
   8. `DRV test PASS/FAIL`.
 
   After the sequence, a status line every second shows nFAULT, both fault registers decoded, and the SPI error count. On VM\_OK loss: `DRV sleep (VM_OK lost)`.
+
+### 2026-10-04: Stage 3 first run: DRV test PASS
+
+- Booted with SW1 already on (VM 11.8 V): VM\_OK, then `DRV wake nfault=high`, and the full test sequence passed (`DRV test PASS spi_err=0`).
+  - Presence 0x03 = 0x3FF.
+  - Defaults 0x000 / 0x3FF / 0x7FF / 0x159 / 0x283 for 0x02–0x06; fault registers 0x000 / 0x000.
+  - Write-verify 0x05 = 0x110.
+  - Lock (0x6FF) ignored a write to 0x05; unlock (0x3FF) then restore 0x159 worked.
+  - CLR\_FLT read back 0x000.
+  - After sleep/wake, 0x05 returned to 0x159 and all defaults were restored; nFAULT high after each wake.
+- Steady state: nFAULT high, no faults, spi\_err = 0 for 20+ s.
+- `task_max_us` = 14,241 µs: the one-time blocking test sequence (SPI words plus about 40 log lines) inside one tick. Expected for this test mode only. The catch-up loop recovers the missed ticks.
+- **Still to check:** LED5 on/off with SW1; SW1 off → `DRV sleep (VM_OK lost)`; repeated SW1 cycles each passing; SPI timing on the scope (nSCS high ≥ 400 ns between words, SCLK low at both nSCS edges, SDO edges).
