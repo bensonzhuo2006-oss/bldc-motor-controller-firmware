@@ -7,7 +7,7 @@ Goal: sensored FOC speed control, brought up stage by stage.
 ## Your role: write code only
 
 - **Do not run any commands.** No builds, no flashing, no scripts, no git, no
-  package installs, no shell at all. Only read and edit files.
+  package installs, only commands that will allow you to read documentation.
 - The developer builds, flashes and tests on real hardware with a scope and
   meter. You cannot see the hardware; never assume a stage worked.
 - If you need information (a build error, a register dump, a scope result,

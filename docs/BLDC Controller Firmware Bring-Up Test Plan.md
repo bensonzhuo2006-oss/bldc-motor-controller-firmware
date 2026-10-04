@@ -34,8 +34,8 @@ All STM32G491RE pins the bring-up firmware uses, plus the pins it leaves alone, 
 | --- | --- | --- | --- | --- |
 | Encoder CSN | PA4 | GPIO output (software chip select) | 1 | R39 10k pull-up to 3.3 V, idles high |
 | Encoder CLK | PA5 | SPI1\_SCK | 1 | 49.9 Ω series (R41); SPI mode 1 (see MT6701 notes) |
-| Encoder DO | PA6 | SPI1\_MISO | 1 | Data out from the MT6701 |
-| (unused) | PA7 | SPI1\_MOSI | — | Assigned by the full-duplex SPI and sends dummy data; the encoder ignores it |
+| Encoder DO | PA6 | SPI1\_MISO | 1 | Data out from the MT6701; 49.9 Ω series (R40, at J14 pin 3) |
+| (unused) | PA7 | SPI1\_MOSI | — | Assigned by the full-duplex SPI and sends dummy data; 49.9 Ω series (R42) to J14 pin 2. Confirm what pin 2 connects to on the encoder board before Stage 1 |
 | MOTOR\_EN | PC1 | GPIO input | 2 | 10k/20k divider from the 5 V relay-coil signal; high when SW1 is on |
 | VM\_SENSE | PB11 | ADC12\_IN14 | 2 | 180k/10k divider (VM ÷ 19); used to confirm VM is above 10 V before waking the DRV |
 | DRV nSCS | PD2 | GPIO output (software chip select) | 3 | Driven high only once VM is present |
@@ -269,7 +269,8 @@ These stages prove everything up to the gate driver without switching any MOSFET
   - [ ] The magnet is centered on the rotor's rotation axis. On this hollow-shaft motor, check it isn't offset.
   - [ ] The gap between the magnet and the MT6701 chip is 0.5–2 mm, typically 1 mm (MT6701 datasheet air gap).
   - [ ] The encoder board is fixed to the stator side, so only the magnet turns with the rotor.
-  - [ ] J14 wiring: pin 1 = 3.3 V, pin 6 = GND, CSN = PA4, CLK = PA5, DO = PA6.
+  - [ ] J14 wiring: pin 1 = 3.3 V, pin 2 = MOSI (PA7, dummy data), pin 3 = DO (PA6), pin 4 = CLK (PA5), pin 5 = CSN (PA4), pin 6 = GND.
+  - [ ] J14 pin 2 doesn't reach the MT6701 MODE pin (SOP-8 pin 2) or anything else the dummy MOSI data could disturb.
 - **Firmware added:** `mt6701` driver.
   - SPI1: mode 1, full-duplex master with dummy transmit, two 12-bit frames per read, software chip select on PA4.
   - Decode: 14-bit angle, 4 status bits, CRC-6 check.
