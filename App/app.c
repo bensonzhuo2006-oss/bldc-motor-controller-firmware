@@ -376,6 +376,11 @@ void app_init(void)
   debug_log("PWR adc1 cal+enable %s en=%u vm_mv=%lu", pwr_ok ? "OK" : "FAIL",
             power_motor_en() ? 1U : 0U, power_vm_mv());
 #endif
+#if BRINGUP_STAGE == 2
+  /* Start from the current SW1 level, so booting with SW1 already on
+   * doesn't count as a switch-on edge. */
+  s_en_raw_prev = power_motor_en_raw();
+#endif
 
   s_last_tick_ms = HAL_GetTick();
 }

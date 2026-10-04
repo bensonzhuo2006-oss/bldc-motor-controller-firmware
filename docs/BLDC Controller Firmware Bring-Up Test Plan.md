@@ -195,7 +195,7 @@ The board has three layers of protection: the bench supply and power-path hardwa
 2. Raise the supply current limit only after the stage that needs it passes, and after the software overcurrent trip for that stage is shown to work.
 3. Never disable a protection to get past a problem. If you must lower a threshold for a test, put it back before moving on.
 4. Faults never clear themselves. Re-arming is always an explicit action, and it always starts from a zero command that ramps up.
-5. When something goes wrong, the first move is SW1 off. It removes motor power whatever the firmware is doing.
+5. When something goes wrong, the first move is SW1 off. It removes motor power whatever the firmware is doing. The bulk capacitors on VM stay charged for minutes afterwards (τ ≈ 190 s through the VM\_SENSE divider, measured in Stage 2), so treat VM as live until it measures near 0 V. Firmware disarms on MOTOR\_EN going low, not on VM falling.
 6. Remember the bench supply limits input current, not phase current. At low speed the phase current can be several times higher than the supply reading, so trust the software trip, not the supply display.
 
 ## Configuration checks: DRV8323 and MT6701
@@ -666,3 +666,21 @@ Dated record of findings, decisions and measured results, newest last. Each entr
 - **Reset cause:** RCC\_CSR decoded and printed at boot, then cleared (RMVF). BORRSTF is reported as power-on/brownout. PINRSTF accompanies every reset, so "PIN" is reported only when nothing else is set. A reset from the debugger shows SOFTWARE or PIN, not power-on.
 - **LED4:** NO\_VM blinks at 1 Hz, VM\_SETTLING at 5 Hz, VM\_OK is steady on.
 - **Stage 2 test mode:** `PWR` status line every 500 ms; state changes logged immediately. On each raw MOTOR\_EN rising edge, VM is captured every 1 ms for 500 ms, then printed every 10 ms (`RAMP t= vm_mv=`) with a summary `RAMP sw1_on->10V=…ms sw1_on->VM_OK=…ms`.
+
+### 2026-10-04: Stage 2 first runs (12 V, 150 mA limit, USB unplugged)
+
+- **SW1 off:** boot log all OK from 12 V alone. en = 0, vm\_mv = 0, NO\_VM, LED4 slow blink. The first reset cause showed POWER\_ON\_OR\_BROWNOUT with csr = 0x1C000000 (BOR + PIN + SFT). The BOR flag was left over from applying 12 V, because earlier stages never cleared the flags.
+- **SW1 switched on with the debug session running:** the meter read VM correctly and LED4 went steady (VM\_OK, firmware running), but **SWO output stopped**. A debugger pause then halted the CPU normally in `app_loop()`, so the debug link was still alive.
+- **Restart with SW1 on:** `RESET cause=SOFTWARE csr=0x14000000` (PIN + SFT, **no BOR**), so the MCU **did not brown out** when SW1 was switched on. NO\_VM → VM\_SETTLING → VM\_OK in 20 ms, as designed. Why SWO stopped is still open. Candidates: the trace stream was disturbed by the relay switching transient, or a 3.3 V dip that stayed above the BOR threshold (BOR level 0 ≈ 1.7 V, so a dip to around 2.5 V wouldn't reset). The next test toggles SW1 with the session running and checks whether SWO continues.
+- **VM reading:** 11,817 mV (code 772), steady to ±1 code (15 mV of VM per code). Not yet compared numerically with the meter at J3 (developer reports the reading is right).
+- **Bug fixed:** booting with SW1 already on counted as a switch-on edge and captured a flat "ramp" at 11.8 V. `s_en_raw_prev` is now set to the current MOTOR\_EN level at init.
+
+### 2026-10-04: Stage 2 VM accuracy and SW1 toggle
+
+- **VM accuracy: pass.** Meter at J3 about 11.8 V against firmware 11.817 V (code 772), well within 3%. Noise ±1 code.
+- **SW1 off: VM\_OK drops at once.** `VM_OK -> NO_VM en=0 vm_mv=11817`: the drop comes from MOTOR\_EN (debounced 5 ms), not from VM.
+- **Finding: VM stays charged for minutes after SW1 off.** VM decayed 11.82 → 10.73 V in about 16 s. With the relay open, the bulk capacitors (about 1,000 µF) discharge only through the 190 kΩ VM\_SENSE divider (and the sleeping DRV's µA draw): τ ≈ 190 kΩ × 1,000 µF ≈ 190 s, which predicts 10.85 V after 16 s. That matches. VM takes about 15 minutes to fall below 1 V. SW1 removes the source, not the stored energy. Bench rule 5 updated.
+- **SW1 on with VM still at 10.7 V:** VM\_OK after 24 ms (5 ms debounce + 20 ms settle), with VM back to 11.8 V within 10 ms. Little inrush, because the capacitors were nearly charged. SWO kept running and no reset occurred. This was **not** the cold-start ramp the procedure asks for (step 4 needs VM starting near 0 V).
+- **Switch-on from VM = 7.6 V (150 mA limit), session running:** no reset. No new `BOOT` line, ALIVE uptime continuous (12 → 13 → 14 s); the only reset flags at boot were from the debugger (SOFTWARE). VM passed 10 V 6 ms after SW1 on and reached 11.77 V within 10 ms; VM\_OK at 26 ms. Rising 4.1 V in ≤ 10 ms into about 1,000 µF needs ≥ 0.4 A, above the 150 mA setting. The charge probably came from the bench supply's output capacitor before its current limit responded. Watch for this: the supply limit doesn't cap a fast surge.
+- **Bulk capacitance estimate:** VM decay τ = 150–165 s across two runs (8.28 → 7.65 V in 12 s; 11.82 → 10.73 V in 16 s). Through 190 kΩ that gives C ≈ 0.8–0.87 mF, consistent with the nominal 1,000 µF (C27–C29 3 × 330 µF + C31 10 µF) given electrolytic tolerance and the DRV's sleep draw.
+- **Still to do:** the cold-start ramp (VM discharged first), several SW1 toggles with no resets, TP2 buck voltage, and checking whether the earlier SWO dropout happens only on cold switch-on (large inrush).
