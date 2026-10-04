@@ -41,9 +41,61 @@
 #define DRV_GATE_HS_LOCK_ON      0x600U   /* 110b: lock */
 #define DRV_GATE_HS_LOCK_OFF     0x300U   /* 011b: unlock */
 
-/** Check the SPI3 configuration and leave the DRV asleep with its SPI
- *  pins undriven. Returns false if SPI3 isn't configured as the plan says. */
+/* Bring-up configuration (plan: DRV8323 register table, "Bring-up value").
+ * If IDRIVE is retuned in Stage 6, change GATE_HS and GATE_LS here; the
+ * shadow copy for the readback check follows. */
+#define DRV_CFG_DRIVER_CTRL       0x000U   /* 6x PWM, fault reporting on */
+#define DRV_CFG_GATE_HS_UNLOCKED  0x322U   /* LOCK 011b, IDRIVEP 60 mA, IDRIVEN 120 mA */
+#define DRV_CFG_GATE_HS_LOCKED    0x622U   /* LOCK 110b after setup */
+#define DRV_CFG_GATE_LS           0x722U   /* CBC 1, TDRIVE 4 us, IDRIVE 60/120 mA */
+#define DRV_CFG_OCP_CTRL          0x110U   /* 100 ns dead time, latched OCP, 4 us deglitch, VDS 0.06 V */
+#define DRV_CFG_CSA_CTRL          0x2C3U   /* VREF/2, 40 V/V, CAL off, SEN_LVL 1 V */
+#define DRV_CSA_CAL_ALL           0x01CU   /* CSA_CAL_A/B/C, bits 4..2 */
+#define DRV_LOCK_TEST_VALUE       DRV_DEFAULT_OCP_CTRL   /* written to 0x05 after locking */
+
+typedef enum
+{
+  DRV_CFG_OK = 0,
+  DRV_CFG_NOT_PRESENT,
+  DRV_CFG_WRITE_FAIL,
+  DRV_CFG_CAL_FAIL,
+  DRV_CFG_LOCK_FAIL,
+  DRV_CFG_LOCK_TEST_FAIL
+} drv_cfg_status_t;
+
+/** Where configure stopped, for the log and the fault context. */
+typedef struct
+{
+  drv_cfg_status_t status;
+  uint8_t  addr;    /* register involved */
+  uint16_t wrote;   /* value written */
+  uint16_t read;    /* value read back */
+} drv_cfg_result_t;
+
+/** Check the SPI3 configuration, set up the nFAULT interrupt (EXTI10 on
+ *  PB10) and leave the DRV asleep with its SPI pins undriven.
+ *  Returns false if SPI3 isn't configured as the plan says. */
 bool drv8323_init(void);
+
+/** After a wake: write and verify the bring-up configuration, run the CSA
+ *  offset calibration, lock, and check that the lock holds (plan: Stage 4,
+ *  "DRV8323: register readback" checks 1 and 2). */
+bool drv8323_configure(drv_cfg_result_t *result);
+
+/** True after a successful drv8323_configure(), until the next sleep. */
+bool drv8323_is_configured(void);
+
+/** Read 0x02-0x06 and compare with the configured shadow copy (readback
+ *  check 3). On a mismatch, addr/value say where. */
+bool drv8323_check_config(uint8_t *addr, uint16_t *value);
+
+/** nFAULT falling edges seen by the interrupt: outside the wake/sleep
+ *  window (real faults) and inside it (ignored wake/sleep pulses). */
+uint32_t drv8323_nfault_events(void);
+uint32_t drv8323_nfault_blanked_events(void);
+
+/** True once if a real nFAULT edge arrived since the last call. */
+bool drv8323_take_nfault_event(void);
 
 /** Wake: PD2 driven high, SPI3 enabled, ENABLE high, wait tWAKE.
  *  Caller makes sure VM_OK is set first. Returns true if nFAULT is high

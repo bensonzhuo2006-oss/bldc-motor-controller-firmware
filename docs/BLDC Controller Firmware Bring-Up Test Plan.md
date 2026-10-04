@@ -584,6 +584,7 @@ All modules live outside the CubeMX "USER CODE" sections, so regenerating the pr
 | `mt6701.c/h` | SPI1 encoder read, CRC and status checks, unwrapping, PLL speed estimate | 1 |
 | `power.c/h` | MOTOR\_EN debounce and the VM power state machine | 2 |
 | `drv8323.c/h` | SPI3 register access, wake/sleep sequence, configuration, fault decoding | 3 |
+| `fault.c/h` | Latched fault codes with first-fault context; explicit clear only (added in Stage 4; not in the original module list) | 4 |
 | `pwm.c/h` | TIM1 setup, motor\_can\_arm() (the only path that sets MOE), disarm, duty writes, break handling | 5 |
 | `cursense.c/h` | ADC injected sampling, offsets, conversion to amps | 7 |
 | `foc_math.c/h` | Clarke/Park transforms, CORDIC sine/cosine, space-vector PWM | 8 |
@@ -722,3 +723,29 @@ Dated record of findings, decisions and measured results, newest last. Each entr
 - Steady state: nFAULT high, no faults, spi\_err = 0 for 20+ s.
 - `task_max_us` = 14,241 µs: the one-time blocking test sequence (SPI words plus about 40 log lines) inside one tick. Expected for this test mode only. The catch-up loop recovers the missed ticks.
 - **Still to check:** LED5 on/off with SW1; SW1 off → `DRV sleep (VM_OK lost)`; repeated SW1 cycles each passing; SPI timing on the scope (nSCS high ≥ 400 ns between words, SCLK low at both nSCS edges, SDO edges).
+
+### 2026-10-04: Stage 3 passed
+
+- Developer: the SPI scope captures look clean. **Decision: SPI3 stays at 664 kHz** (÷256); 1.33 MHz is not needed.
+- Not explicitly reported: the LED5 on/off check and the SW1-off log lines (`DRV sleep (VM_OK lost)`).
+
+### 2026-10-04: Stage 4 firmware written (not yet built or tested)
+
+- **Files:** `App/fault.c/h` (new; added to the module table), `App/drv8323.c/h` (configuration, CSA calibration, lock and lock test, readback against the shadow copy, nFAULT EXTI), `App/app.c` (configure after every wake, 100 ms readback, fault latch and response, Stage 4 status line), `App/app_config.h` (`BRINGUP_STAGE 4`), `CMakeLists.txt` (adds `fault.c`). No CubeMX change.
+- **Configuration after every wake:**
+  1. Presence check.
+  2. Write and verify 0x02 = 0x000, 0x04 = 0x722, 0x05 = 0x110, 0x06 = 0x2C3, 0x03 = 0x322.
+  3. CSA offset calibration: 0x06 = 0x2DF (CSA\_CAL\_A/B/C set), hold 200 µs (datasheet 8.3.4.3: auto-trim takes 100 µs), back to 0x2C3 and verify. This has to happen before the lock, because a locked DRV ignores writes to 0x06.
+  4. Lock: 0x03 = 0x622, verify.
+  5. Lock test: write 0x159 to 0x05; it must still read 0x110.
+
+  The shadow copy for the readback is 0x02–0x06 = 0x000 / 0x622 / 0x722 / 0x110 / 0x2C3.
+- **Periodic check (every 100 ms while configured):** 0x02–0x06 against the shadow copy (a mismatch is FAULT\_DRV\_CONFIG\_MISMATCH), then both fault registers (any bit set is FAULT\_DRV\_FAULT\_BITS). Any SPI timeout is FAULT\_DRV\_SPI.
+- **nFAULT interrupt:** EXTI line 10 on PB10, falling edge, NVIC priority 4. Set up at runtime: CubeMX can't put EXTI on a pin that's also TIM1\_BKIN. The pin stays in its BKIN alternate function; the EXTI uses the GPIO input path, which is active in AF mode (to be confirmed on the bench by the wake-pulse count). The interrupt only latches. A blanking flag covers sleep and the wake window (ENABLE high + 1.1 ms), so the wake pulse is counted as `nf_ignored`, not a fault. After the window, a falling edge raises FAULT\_DRV\_NFAULT (with both fault registers as context). nFAULT still low at the end of the wake window raises FAULT\_DRV\_WAKE.
+- **Fault response:** the first fault is latched with its context and logged once. The DRV fault registers are read and decoded before the DRV is put to sleep, because sleep resets them. Then `drv8323_sleep()` disarms (outputs off, then ENABLE low). The DRV isn't woken again while a fault is latched. **Clearing is explicit:** set `g_fault_clear_request = 1` from the debugger (pause, edit in Watch or the Debug Console, continue). VM\_OK loss is normal operation, not a fault.
+- **Note on 0x06 SEN\_LVL = 1 V:** the sense-overcurrent comparator looks at the SP pin voltage, which is the shunt voltage (datasheet 8.3.6.4). 1 V across 5 mΩ is 200 A, so SEN\_OCP never trips on this board. Short-circuit protection is VDS OCP (0.06 V, about 16–21 A), as the register table says. No change made.
+- **First run (3 SW1 cycles in about 32 s):** every wake configured OK. Registers 02 = 0x000, 03 = 0x622, 04 = 0x722, 05 = 0x110, 06 = 0x2C3; lock test held 0x110; fault registers 0x000 / 0x000. Readback about 10 checks/s with no mismatch; nf\_ev = 0; fault = NONE.
+  - **EXTI on PB10 in TIM1\_BKIN AF mode confirmed working:** `wake_pulses_ignored=1` on every wake. `nf_ignored` also rises by 1 at each sleep (the datasheet's power-down pulse), so it goes up by 2 per SW1 cycle.
+  - `task_max_us` = 3,929 µs: the configure sequence (about 20 SPI words plus calibration plus logging) runs once per wake.
+  - Still to do: complete about 20 SW1 cycles, SOA/SOB/SOC with a meter (expect about 1.65 V), and the optional nFAULT-short check of the fault latch.
+- **Stage 4 test mode:** after each wake, `DRV wake #N ... wake_pulses_ignored=… cfg OK ...` and a register dump line. A status line every second: state, nFAULT, fault registers, wakes / cfg\_ok / cfg\_fail / checks, nf\_ev / nf\_ignored, latched fault.

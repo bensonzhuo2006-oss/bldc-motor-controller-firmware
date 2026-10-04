@@ -15,6 +15,9 @@
 #if BRINGUP_STAGE >= 3
 #include "drv8323.h"
 #endif
+#if BRINGUP_STAGE >= 4
+#include "fault.h"
+#endif
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -87,8 +90,29 @@
 #define STAGE3_FAULT_TEXT_LEN       96U
 #endif
 
+#if BRINGUP_STAGE >= 4
+/* DRV configuration readback period (plan: readback check 3, every 100 ms). */
+#define DRV_CHECK_PERIOD_MS         100UL
+#define DRV_FAULT_TEXT_LEN          96U
+#endif
+
+#if BRINGUP_STAGE == 4
+/* Stage 4 test mode: status line every second with the configuration
+ * counters, for the SW1 cycling test (plan: Stage 4 procedure). */
+#define STAGE4_LOG_PERIOD_MS        1000UL
+#endif
+
 static uint32_t s_last_tick_ms;
 static uint32_t s_task_max_cycles;
+
+#if BRINGUP_STAGE >= 4
+static uint32_t s_drv_wakes;
+static uint32_t s_drv_cfg_ok;
+static uint32_t s_drv_cfg_fail;
+static uint32_t s_drv_checks;
+static uint32_t s_drv_spi_err_seen;
+static bool s_fault_logged;
+#endif
 
 #if BRINGUP_STAGE >= 1
 static uint32_t s_enc_read_max_cycles;
@@ -462,17 +486,156 @@ static void stage3_test(void)
 
 /* ---- Gate driver (Stage 3 onward) ----------------------------------------- */
 
+#if BRINGUP_STAGE >= 4
+static fault_code_t drv_cfg_fault_code(drv_cfg_status_t status)
+{
+  switch (status)
+  {
+    case DRV_CFG_NOT_PRESENT:    return FAULT_DRV_NOT_PRESENT;
+    case DRV_CFG_LOCK_TEST_FAIL: return FAULT_DRV_LOCK_TEST;
+    default:                     return FAULT_DRV_CONFIG_WRITE;
+  }
+}
+
+static void drv_log_registers(const char *prefix)
+{
+  uint16_t v[DRV_REG_COUNT] = {0U};
+  for (uint8_t a = 0U; a < DRV_REG_COUNT; a++)
+  {
+    (void)drv8323_read(a, &v[a]);
+  }
+  debug_log("%s f1=0x%03X f2=0x%03X 02=0x%03X 03=0x%03X 04=0x%03X 05=0x%03X 06=0x%03X",
+            prefix, (unsigned)v[0], (unsigned)v[1], (unsigned)v[2], (unsigned)v[3],
+            (unsigned)v[4], (unsigned)v[5], (unsigned)v[6]);
+}
+
+/* After a wake: configure, verify, calibrate, lock (plan Stage 4). */
+static void drv_configure_after_wake(bool nfault_released, uint32_t blanked_before)
+{
+  uint32_t pulses = drv8323_nfault_blanked_events() - blanked_before;
+
+  s_drv_wakes++;
+  if (!nfault_released)
+  {
+    debug_log("DRV wake #%lu nfault still LOW after %s", s_drv_wakes, "1.1 ms");
+    (void)fault_raise(FAULT_DRV_WAKE, 0U, 0U);
+    return;
+  }
+
+  drv_cfg_result_t r;
+  if (drv8323_configure(&r))
+  {
+    s_drv_cfg_ok++;
+    debug_log("DRV wake #%lu nfault=high wake_pulses_ignored=%lu cfg OK (cal done, locked, lock test reg05=0x%03X)",
+              s_drv_wakes, pulses, (unsigned)r.read);
+    drv_log_registers("DRV cfg");
+  }
+  else
+  {
+    s_drv_cfg_fail++;
+    debug_log("DRV wake #%lu cfg FAIL status=%u reg=0x%02X wrote=0x%03X read=0x%03X",
+              s_drv_wakes, (unsigned)r.status, r.addr, (unsigned)r.wrote, (unsigned)r.read);
+    (void)fault_raise(drv_cfg_fault_code(r.status),
+                      ((uint32_t)r.addr << 16) | r.wrote, r.read);
+  }
+}
+
+/* Every tick while awake: nFAULT events, SPI errors, 100 ms readback.
+ * Then the fault response: log, read the fault registers, put the DRV to
+ * sleep (disarm). Faults stay latched until g_fault_clear_request. */
+static void drv_monitor(uint32_t now_ms)
+{
+  if (g_fault_clear_request != 0U)
+  {
+    g_fault_clear_request = 0U;
+    debug_log("FAULT cleared by request (was %s, count=%lu)",
+              fault_name(fault_first()), fault_count());
+    fault_clear();
+    s_fault_logged = false;
+  }
+
+  if (drv8323_is_awake() && !fault_active())
+  {
+    if (drv8323_take_nfault_event())
+    {
+      uint16_t f1 = 0U;
+      uint16_t f2 = 0U;
+      (void)drv8323_read(DRV_REG_FAULT1, &f1);
+      (void)drv8323_read(DRV_REG_FAULT2, &f2);
+      (void)fault_raise(FAULT_DRV_NFAULT, f1, f2);
+    }
+    else if (drv8323_is_configured() && ((now_ms % DRV_CHECK_PERIOD_MS) == 0U))
+    {
+      uint8_t addr = 0U;
+      uint16_t val = 0U;
+      uint16_t f1 = 0U;
+      uint16_t f2 = 0U;
+      s_drv_checks++;
+      if (!drv8323_check_config(&addr, &val))
+      {
+        (void)fault_raise(FAULT_DRV_CONFIG_MISMATCH, addr, val);
+      }
+      else if (drv8323_read(DRV_REG_FAULT1, &f1) && drv8323_read(DRV_REG_FAULT2, &f2) &&
+               ((f1 != 0U) || (f2 != 0U)))
+      {
+        (void)fault_raise(FAULT_DRV_FAULT_BITS, f1, f2);
+      }
+    }
+
+    if (drv8323_spi_errors() != s_drv_spi_err_seen)
+    {
+      s_drv_spi_err_seen = drv8323_spi_errors();
+      (void)fault_raise(FAULT_DRV_SPI, s_drv_spi_err_seen, 0U);
+    }
+  }
+
+  if (fault_active() && !s_fault_logged)
+  {
+    uint32_t c1;
+    uint32_t c2;
+    uint32_t t;
+    fault_first_context(&c1, &c2, &t);
+    debug_log("FAULT latched %s ctx1=0x%lX ctx2=0x%lX t=%lums", fault_name(fault_first()), c1, c2, t);
+    if (drv8323_is_awake())
+    {
+      uint16_t f1 = 0U;
+      uint16_t f2 = 0U;
+      char text[DRV_FAULT_TEXT_LEN];
+      bool ok = drv8323_read(DRV_REG_FAULT1, &f1) && drv8323_read(DRV_REG_FAULT2, &f2);
+      drv8323_fault_text(f1, f2, text, sizeof(text));
+      debug_log("FAULT drv f1=0x%03X f2=0x%03X %s nfault=%s", (unsigned)f1, (unsigned)f2,
+                ok ? text : "READ_FAIL", drv8323_nfault_low() ? "LOW" : "high");
+      drv8323_sleep();
+      debug_log("FAULT disarmed, DRV asleep. Set g_fault_clear_request=1 in the debugger to clear.");
+    }
+    s_fault_logged = true;
+  }
+}
+#endif
+
 #if BRINGUP_STAGE >= 3
-/* The DRV is awake exactly while VM_OK holds (plan Stage 3: wake on VM_OK;
- * on VM_OK loss disarm, ENABLE low, release PD2). Runs after power_tick(). */
+/* The DRV is awake exactly while VM_OK holds and no fault is latched
+ * (plan Stage 3: wake on VM_OK; on VM_OK loss disarm, ENABLE low, release
+ * PD2; Stage 4: configure after every wake). Runs after power_tick(). */
 static void drv_tick(void)
 {
   bool vm_ok = power_vm_ok();
+#if BRINGUP_STAGE >= 4
+  bool may_wake = vm_ok && !fault_active();
+#else
+  bool may_wake = vm_ok;
+#endif
 
-  if (vm_ok && !drv8323_is_awake())
+  if (may_wake && !drv8323_is_awake())
   {
+#if BRINGUP_STAGE >= 4
+    uint32_t blanked_before = drv8323_nfault_blanked_events();
+    bool nfault_released = drv8323_wake();
+    drv_configure_after_wake(nfault_released, blanked_before);
+#else
     bool nfault_released = drv8323_wake();
     debug_log("DRV wake nfault=%s", nfault_released ? "high" : "LOW");
+#endif
 #if BRINGUP_STAGE == 3
     stage3_test();
 #endif
@@ -482,6 +645,28 @@ static void drv_tick(void)
     drv8323_sleep();
     debug_log("DRV sleep (VM_OK lost) vm_mv=%lu", power_vm_mv());
   }
+}
+#endif
+
+#if BRINGUP_STAGE == 4
+static void stage4_tick(uint32_t now_ms)
+{
+  if ((now_ms % STAGE4_LOG_PERIOD_MS) != 0U)
+  {
+    return;
+  }
+  const char *st = drv8323_is_configured() ? "CONFIGURED" : (drv8323_is_awake() ? "AWAKE" : "ASLEEP");
+  uint16_t f1 = 0U;
+  uint16_t f2 = 0U;
+  if (drv8323_is_awake())
+  {
+    (void)drv8323_read(DRV_REG_FAULT1, &f1);
+    (void)drv8323_read(DRV_REG_FAULT2, &f2);
+  }
+  debug_log("DRV %s pwr=%s nfault=%s f1=0x%03X f2=0x%03X wakes=%lu cfg_ok=%lu cfg_fail=%lu checks=%lu nf_ev=%lu nf_ignored=%lu fault=%s",
+            st, power_state_name(power_state()), drv8323_nfault_low() ? "LOW" : "high",
+            (unsigned)f1, (unsigned)f2, s_drv_wakes, s_drv_cfg_ok, s_drv_cfg_fail, s_drv_checks,
+            drv8323_nfault_events(), drv8323_nfault_blanked_events(), fault_name(fault_first()));
 }
 #endif
 
@@ -583,6 +768,9 @@ void app_loop(void)
 #if BRINGUP_STAGE >= 3
     drv_tick();
 #endif
+#if BRINGUP_STAGE >= 4
+    drv_monitor(s_last_tick_ms);
+#endif
 
 #if BRINGUP_STAGE == 0
     stage0_tick(s_last_tick_ms);
@@ -592,6 +780,8 @@ void app_loop(void)
     stage2_tick(s_last_tick_ms);
 #elif BRINGUP_STAGE == 3
     stage3_tick(s_last_tick_ms);
+#elif BRINGUP_STAGE == 4
+    stage4_tick(s_last_tick_ms);
 #endif
     uint32_t elapsed = debug_cycles() - start;
     if (elapsed > s_task_max_cycles)

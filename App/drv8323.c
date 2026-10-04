@@ -50,11 +50,39 @@
 #define DRV_MODER_OUTPUT         1UL
 #define DRV_MODER_ANALOG         3UL
 
+/* CSA auto offset calibration takes 100 us after CSA_CAL_X is set
+ * (datasheet 8.3.4.3); hold it twice that. */
+#define DRV_CSA_CAL_US           200U
+
+/* nFAULT interrupt: EXTI line 10 on port B (RM0440 SYSCFG_EXTICR3,
+ * EXTI10 field: 0001 = PB). The pin stays in its TIM1_BKIN alternate
+ * function; the EXTI takes the GPIO input path, which is active in AF mode.
+ * Priority below the control interrupt and TIM1 break (0) and above SysTick
+ * (plan: Timing, interrupts). */
+#define DRV_EXTI_PORT_B          1UL
+#define DRV_NFAULT_IRQ_PRIORITY  4U
+
 /* ---- State ---------------------------------------------------------------- */
 
 static bool s_awake;
+static bool s_configured;
 static uint32_t s_sleep_tick;
 static uint32_t s_spi_errors;
+
+/* Shared with the nFAULT interrupt. s_nfault_blank is true while the DRV is
+ * asleep or in its wake/sleep window, when nFAULT pulses low by design
+ * (datasheet 8.4.1.2). */
+static volatile bool s_nfault_blank = true;
+static volatile bool s_nfault_event;
+static volatile uint32_t s_nfault_events;
+static volatile uint32_t s_nfault_blanked_events;
+
+/* Expected 0x02-0x06 after configure (0x03 locked). */
+static const uint16_t s_shadow[DRV_REG_COUNT] =
+{
+  0U, 0U, DRV_CFG_DRIVER_CTRL, DRV_CFG_GATE_HS_LOCKED, DRV_CFG_GATE_LS,
+  DRV_CFG_OCP_CTRL, DRV_CFG_CSA_CTRL
+};
 
 /* ---- Helpers -------------------------------------------------------------- */
 
@@ -152,7 +180,165 @@ bool drv8323_init(void)
 
   drv8323_sleep();
   s_spi_errors = 0U;
+
+  /* nFAULT falling-edge interrupt (plan: "Before the PWM is configured
+   * (Stage 4), nFAULT is watched with an EXTI interrupt on PB10"). */
+  __HAL_RCC_SYSCFG_CLK_ENABLE();
+  SYSCFG->EXTICR[2] = (SYSCFG->EXTICR[2] & ~SYSCFG_EXTICR3_EXTI10) |
+                      (DRV_EXTI_PORT_B << SYSCFG_EXTICR3_EXTI10_Pos);
+  EXTI->RTSR1 &= ~EXTI_RTSR1_RT10;
+  EXTI->FTSR1 |= EXTI_FTSR1_FT10;
+  EXTI->PR1 = EXTI_PR1_PIF10;
+  EXTI->IMR1 |= EXTI_IMR1_IM10;
+  NVIC_SetPriority(EXTI15_10_IRQn, DRV_NFAULT_IRQ_PRIORITY);
+  NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
+  NVIC_EnableIRQ(EXTI15_10_IRQn);
+
   return cfg_ok;
+}
+
+/* nFAULT falling edge. Latch only; the main loop reads the fault registers
+ * before anything puts the DRV to sleep (sleep resets them). */
+void EXTI15_10_IRQHandler(void)
+{
+  if ((EXTI->PR1 & EXTI_PR1_PIF10) != 0U)
+  {
+    EXTI->PR1 = EXTI_PR1_PIF10;
+    if (s_nfault_blank)
+    {
+      s_nfault_blanked_events++;
+    }
+    else
+    {
+      s_nfault_events++;
+      s_nfault_event = true;
+    }
+  }
+}
+
+bool drv8323_configure(drv_cfg_result_t *r)
+{
+  /* Unlocked register writes, in order; 0x03 last so LOCK stays 011b. */
+  static const uint8_t order[] =
+  {
+    DRV_REG_DRIVER_CTRL, DRV_REG_GATE_LS, DRV_REG_OCP_CTRL, DRV_REG_CSA_CTRL, DRV_REG_GATE_HS
+  };
+  static const uint16_t values[] =
+  {
+    DRV_CFG_DRIVER_CTRL, DRV_CFG_GATE_LS, DRV_CFG_OCP_CTRL, DRV_CFG_CSA_CTRL, DRV_CFG_GATE_HS_UNLOCKED
+  };
+  uint16_t rb = 0U;
+
+  s_configured = false;
+  r->status = DRV_CFG_OK;
+  r->addr = DRV_REG_GATE_HS;
+  r->wrote = 0U;
+  r->read = 0U;
+
+  if (!drv8323_present(&rb))
+  {
+    r->status = DRV_CFG_NOT_PRESENT;
+    r->read = rb;
+    return false;
+  }
+
+  for (uint32_t i = 0U; i < (sizeof(order) / sizeof(order[0])); i++)
+  {
+    if (!drv8323_write_verify(order[i], values[i], &rb))
+    {
+      r->status = DRV_CFG_WRITE_FAIL;
+      r->addr = order[i];
+      r->wrote = values[i];
+      r->read = rb;
+      return false;
+    }
+  }
+
+  /* CSA offset calibration: inputs shorted and auto-trimmed while
+   * CSA_CAL_X = 1, then back to normal (datasheet 8.3.4.3). Before the
+   * lock, because 0x06 can't be written once locked. */
+  r->addr = DRV_REG_CSA_CTRL;
+  r->wrote = DRV_CFG_CSA_CTRL | DRV_CSA_CAL_ALL;
+  if (!drv8323_write_verify(DRV_REG_CSA_CTRL, DRV_CFG_CSA_CTRL | DRV_CSA_CAL_ALL, &rb))
+  {
+    r->status = DRV_CFG_CAL_FAIL;
+    r->read = rb;
+    return false;
+  }
+  drv_wait_cycles(DRV_CSA_CAL_US * DRV_CYCLES_PER_US);
+  r->wrote = DRV_CFG_CSA_CTRL;
+  if (!drv8323_write_verify(DRV_REG_CSA_CTRL, DRV_CFG_CSA_CTRL, &rb))
+  {
+    r->status = DRV_CFG_CAL_FAIL;
+    r->read = rb;
+    return false;
+  }
+
+  /* Lock. */
+  r->addr = DRV_REG_GATE_HS;
+  r->wrote = DRV_CFG_GATE_HS_LOCKED;
+  if (!drv8323_write_verify(DRV_REG_GATE_HS, DRV_CFG_GATE_HS_LOCKED, &rb))
+  {
+    r->status = DRV_CFG_LOCK_FAIL;
+    r->read = rb;
+    return false;
+  }
+
+  /* Lock test: a different value written to 0x05 must be ignored. */
+  r->addr = DRV_REG_OCP_CTRL;
+  r->wrote = DRV_LOCK_TEST_VALUE;
+  if (!drv8323_write(DRV_REG_OCP_CTRL, DRV_LOCK_TEST_VALUE, NULL) ||
+      !drv8323_read(DRV_REG_OCP_CTRL, &rb) || (rb != DRV_CFG_OCP_CTRL))
+  {
+    r->status = DRV_CFG_LOCK_TEST_FAIL;
+    r->read = rb;
+    return false;
+  }
+  r->read = rb;
+
+  s_configured = true;
+  return true;
+}
+
+bool drv8323_is_configured(void)
+{
+  return s_configured;
+}
+
+bool drv8323_check_config(uint8_t *addr, uint16_t *value)
+{
+  for (uint8_t a = DRV_REG_DRIVER_CTRL; a < DRV_REG_COUNT; a++)
+  {
+    uint16_t v = 0U;
+    bool ok = drv8323_read(a, &v);
+    if (!ok || (v != s_shadow[a]))
+    {
+      *addr = a;
+      *value = v;
+      return false;
+    }
+  }
+  return true;
+}
+
+uint32_t drv8323_nfault_events(void)
+{
+  return s_nfault_events;
+}
+
+uint32_t drv8323_nfault_blanked_events(void)
+{
+  return s_nfault_blanked_events;
+}
+
+bool drv8323_take_nfault_event(void)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  bool ev = s_nfault_event;
+  s_nfault_event = false;
+  __set_PRIMASK(primask);
+  return ev;
 }
 
 bool drv8323_wake(void)
@@ -169,15 +355,25 @@ bool drv8323_wake(void)
   /* SPI3 on before the first nSCS edge, so SCLK is driven low (CPOL = 0). */
   SPI3->CR1 |= SPI_CR1_SPE;
 
+  s_nfault_blank = true;      /* nFAULT is held low during wake */
+  s_nfault_event = false;     /* drop any event left from before the last sleep */
   BOARD_DRV_ENABLE_PORT->BSRR = BOARD_DRV_ENABLE_PIN;
   drv_wait_cycles(DRV_WAKE_WAIT_US * DRV_CYCLES_PER_US);
 
   s_awake = true;
-  return !drv8323_nfault_low();
+  s_configured = false;       /* registers are at their defaults after wake */
+  bool released = !drv8323_nfault_low();
+  if (released)
+  {
+    s_nfault_blank = false;   /* from here a falling edge is a real fault */
+  }
+  return released;
 }
 
 void drv8323_sleep(void)
 {
+  s_nfault_blank = true;      /* nFAULT pulses low while powering down */
+  s_configured = false;
   motor_disarm();             /* outputs off, then ENABLE low */
   drv_spi3_disable();         /* SCLK/SDI no longer driven */
   drv_nscs_mode(DRV_MODER_ANALOG);   /* PD2 released; R38 holds nSCS high */
