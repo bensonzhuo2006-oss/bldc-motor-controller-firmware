@@ -27,6 +27,9 @@
 #define BOARD_MOTOR_EN_PORT     MOTOR_EN_GPIO_Port        /* PC1, R16/R17 divider */
 #define BOARD_MOTOR_EN_PIN      MOTOR_EN_Pin
 
+#define BOARD_DRV_NFAULT_PORT   GPIOB                     /* PB10, TIM1_BKIN, R22 10k pull-up */
+#define BOARD_DRV_NFAULT_PIN    GPIO_PIN_10
+
 /* PD2 pin number, for the MODER readback in the safe-pin check. */
 #define BOARD_DRV_NSCS_PIN_NUM  2U
 
@@ -93,6 +96,20 @@ static inline void board_safe_pins(void)
   BOARD_DRV_CAL_PORT->BRR = BOARD_DRV_CAL_PIN;
 
   SPI3->CR1 &= ~SPI_CR1_SPE;
+}
+
+/**
+ * Disarm: PWM outputs off first (MOE = 0, outputs to their low idle level),
+ * then DRV ENABLE low, within the DRV's 40 us window (plan: Hard rules,
+ * disarm order; DRV8323 datasheet 8.4.1.1). Together with the hardware
+ * break, the only normal-operation path that clears MOE. Moves to pwm.c in
+ * Stage 5. (board_safe_pins() at boot and the HardFault handler also clear
+ * MOE directly.)
+ */
+static inline void motor_disarm(void)
+{
+  TIM1->BDTR &= ~TIM_BDTR_MOE;
+  BOARD_DRV_ENABLE_PORT->BRR = BOARD_DRV_ENABLE_PIN;
 }
 
 /** Six gate-input pin levels, bit 0..5 = INHA, INHB, INHC, INLA, INLB, INLC. */

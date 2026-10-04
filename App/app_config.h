@@ -9,7 +9,7 @@
 #define APP_CONFIG_H
 
 /* Current bring-up stage (plan: "Stages 0-4" onward). */
-#define BRINGUP_STAGE 2
+#define BRINGUP_STAGE 3
 
 /* Stage 0 one-off: execute an undefined instruction 5 s after boot to check
  * that the HardFault dump appears over SWO. Set to 1 only for that test

@@ -684,3 +684,28 @@ Dated record of findings, decisions and measured results, newest last. Each entr
 - **Switch-on from VM = 7.6 V (150 mA limit), session running:** no reset. No new `BOOT` line, ALIVE uptime continuous (12 → 13 → 14 s); the only reset flags at boot were from the debugger (SOFTWARE). VM passed 10 V 6 ms after SW1 on and reached 11.77 V within 10 ms; VM\_OK at 26 ms. Rising 4.1 V in ≤ 10 ms into about 1,000 µF needs ≥ 0.4 A, above the 150 mA setting. The charge probably came from the bench supply's output capacitor before its current limit responded. Watch for this: the supply limit doesn't cap a fast surge.
 - **Bulk capacitance estimate:** VM decay τ = 150–165 s across two runs (8.28 → 7.65 V in 12 s; 11.82 → 10.73 V in 16 s). Through 190 kΩ that gives C ≈ 0.8–0.87 mF, consistent with the nominal 1,000 µF (C27–C29 3 × 330 µF + C31 10 µF) given electrolytic tolerance and the DRV's sleep draw.
 - **Still to do:** the cold-start ramp (VM discharged first), several SW1 toggles with no resets, TP2 buck voltage, and checking whether the earlier SWO dropout happens only on cold switch-on (large inrush).
+
+### 2026-10-04: Stage 2 passed (with the switch-on note confirmed)
+
+- **Switch-on from VM bled to about 2 V, 150 mA limit:** SWO stopped suddenly, the same as the first cold switch-on. This is consistent with the plan's switch-on note (inrush sags the 12 V input). Not proven whether the MCU reset or only the SWO trace dropped. A restart showing `RESET cause=POWER_ON_OR_BROWNOUT` would settle it.
+- **Decision (developer):** raise the supply limit (about 1 A) for SW1 switch-on, as the switch-on note prescribes, then lower it to the stage's limit.
+- **Pass:** runs from 12 V alone; VM within 3% of the meter (11.8 V against 11.817 V); VM\_OK only above 10 V, held 20 ms; VM\_OK drops on SW1 off. Not measured: TP2 buck output. No cold-start (0 V) ramp captured.
+
+### 2026-10-04: Stage 3 firmware written (not yet built or tested)
+
+- **Files:** `App/drv8323.c/h` (new), `App/board.h` (nFAULT pin, `motor_disarm()`), `App/app.c` (DRV wake/sleep tied to VM\_OK, Stage 3 test sequence), `App/app_config.h` (`BRINGUP_STAGE 3`), `CMakeLists.txt` (adds `drv8323.c`). No CubeMX change: PD2 stays analog in CubeMX and is switched to a push-pull output (driven high first) at wake, then back to analog at sleep. Runtime register writes, as the plan's "undriven until VM present" rule needs.
+- **Datasheet facts used (SLVSDJ3D):** tWAKE and tSLEEP 1 ms max (7.5), so the firmware waits 1.1 ms after ENABLE high and keeps a re-wake at least 2 ms after a sleep. SPI timing (7.6): nSCS setup and hold ≥ 50 ns (firmware 200 ns), high ≥ 400 ns between words (firmware 1 µs). SPI format (8.5.1.1): SDO = 5 don't-care bits + 11 data bits; a write returns the old value. nFAULT is held low during wake and sleep for at most tWAKE/tSLEEP (8.4.1.2). Registers reset on sleep and UVLO.
+- **Wake order:** PD2 high (output) → SPI3 SPE = 1 (SCLK driven low before any nSCS edge) → ENABLE high → wait 1.1 ms → check nFAULT. **Sleep order:** `motor_disarm()` (MOE = 0, then ENABLE low) → SPI3 disabled per the RM0440 procedure → PD2 back to analog (R38 holds nSCS high).
+- **Register access:** register polling on SPI3 with a 100 µs timeout per word (a word takes 24 µs). Read and write are refused while the DRV is asleep. Write-then-verify, presence check (0x03 = 0x3FF; 0x7FF means no reply), and fault decode to text (both fault registers, bit names from datasheet Tables 8-12 and 8-13).
+- **Hard-rule note:** `motor_disarm()` lives in `board.h` until `pwm.c` exists (Stage 5). Apart from the hardware break, it is the only normal-operation path that clears MOE. The boot safe-pin routine and the HardFault handler also clear MOE directly; these are deliberate exceptions for boot and fault handling.
+- **Stage 3 test sequence (after each wake on VM\_OK):**
+  1. Presence check.
+  2. Read 0x00–0x06 and compare 0x02–0x06 with the defaults 0x000, 0x3FF, 0x7FF, 0x159, 0x283; fault registers should read clean.
+  3. Write 0x05 = 0x110 and verify.
+  4. Lock (0x03 = 0x6FF), then a write of 0x159 to 0x05 must be ignored (still 0x110).
+  5. Unlock (0x03 = 0x3FF), then 0x05 = 0x159 must verify.
+  6. CLR\_FLT: write 0x02 = 0x001, read back 0x000.
+  7. Write 0x05 = 0x110, sleep, wake, then 0x05 must be back to 0x159 and all defaults restored.
+  8. `DRV test PASS/FAIL`.
+
+  After the sequence, a status line every second shows nFAULT, both fault registers decoded, and the SPI error count. On VM\_OK loss: `DRV sleep (VM_OK lost)`.
