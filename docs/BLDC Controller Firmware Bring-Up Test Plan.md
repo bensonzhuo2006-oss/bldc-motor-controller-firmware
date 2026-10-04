@@ -35,10 +35,10 @@ All STM32G491RE pins the bring-up firmware uses, plus the pins it leaves alone, 
 | Encoder CSN | PA4 | GPIO output (software chip select) | 1 | R39 10k pull-up to 3.3 V, idles high |
 | Encoder CLK | PA5 | SPI1\_SCK | 1 | 49.9 Ω series (R41); SPI mode 1 (see MT6701 notes) |
 | Encoder DO | PA6 | SPI1\_MISO | 1 | Data out from the MT6701; 49.9 Ω series (R40, at J14 pin 3) |
-| (unused) | PA7 | SPI1\_MOSI | — | Assigned by the full-duplex SPI and sends dummy data; 49.9 Ω series (R42) to J14 pin 2. Confirm what pin 2 connects to on the encoder board before Stage 1 |
+| (unused) | PA7 | SPI1\_MOSI | — | Assigned by the full-duplex SPI and sends dummy data; 49.9 Ω series (R42) to J14 pin 2, which is not connected on the encoder board |
 | MOTOR\_EN | PC1 | GPIO input | 2 | 10k/20k divider from the 5 V relay-coil signal; high when SW1 is on |
 | VM\_SENSE | PB11 | ADC12\_IN14 | 2 | 180k/10k divider (VM ÷ 19); used to confirm VM is above 10 V before waking the DRV |
-| DRV nSCS | PD2 | GPIO output (software chip select) | 3 | Driven high only once VM is present |
+| DRV nSCS | PD2 | GPIO output (software chip select) | 3 | Driven high only once VM is present. R38 10k pull-up to 3.3 V holds nSCS high whenever 3.3 V is up, even while PD2 is undriven |
 | DRV SCLK | PC10 | SPI3\_SCK | 3 | SPI mode 1, 16-bit |
 | DRV SDO | PC11 | SPI3\_MISO | 3 | Open-drain, R23 10k pull-up; limits SPI3 to about 664 kHz |
 | DRV SDI | PC12 | SPI3\_MOSI | 3 |  |
@@ -270,7 +270,7 @@ These stages prove everything up to the gate driver without switching any MOSFET
   - [ ] The gap between the magnet and the MT6701 chip is 0.5–2 mm, typically 1 mm (MT6701 datasheet air gap).
   - [ ] The encoder board is fixed to the stator side, so only the magnet turns with the rotor.
   - [ ] J14 wiring: pin 1 = 3.3 V, pin 2 = MOSI (PA7, dummy data), pin 3 = DO (PA6), pin 4 = CLK (PA5), pin 5 = CSN (PA4), pin 6 = GND.
-  - [ ] J14 pin 2 doesn't reach the MT6701 MODE pin (SOP-8 pin 2) or anything else the dummy MOSI data could disturb.
+  - [x] J14 pin 2 (MOSI) is not connected on the encoder board, so the dummy MOSI data goes nowhere (confirmed 2026-10-04).
 - **Firmware added:** `mt6701` driver.
   - SPI1: mode 1, full-duplex master with dummy transmit, two 12-bit frames per read, software chip select on PA4.
   - Decode: 14-bit angle, 4 status bits, CRC-6 check.
@@ -598,3 +598,45 @@ All modules live outside the CubeMX "USER CODE" sections, so regenerating the pr
 - [ ] Stage 8: motor line-to-line resistance measured (expect about 3.2 Ω) to confirm the delta conversion.
 - [ ] Stage 8: current readings confirmed against a multimeter before the trip is raised above 1 A.
 - [ ] Stage 13: inductance measured and current-loop gains recomputed from the measured R and L.
+
+## Bring-up log
+
+Dated record of findings, decisions and measured results, newest last. Each entry names the stage it affects. When an entry changes a fact, the section above that holds the fact is updated too.
+
+### 2026-10-04: document and schematic review (before Stage 0)
+
+- **Pin map checked** against the STM32 schematic sheet and the STM32G491 datasheet pin table (DS13122 Table 12). Every pin's function is available where the plan puts it: SPI1 on PA4–PA7, SPI3 on PC10–PC12, TIM1\_CH1–3 on PA8–PA10, CH1N–3N on PB13–PB15, TIM1\_BKIN on PB10, ADC2/1/3\_IN12 on PB2/PB1/PB0, ADC12\_IN14 on PB11, OPAMP1\_VOUT on PA2.
+- **DRV8323 register values checked** against the datasheet register map (SLVSDJ3D section 8.6). All bring-up values and reset values in the register table decode correctly.
+- **Encoder lines:** three 49.9 Ω series resistors, not one: R41 on CLK (PA5) and R42 on MOSI (PA7) at the MCU, and R40 on DO (PA6) at J14 pin 3. J14 pin order: 1 = 3.3 V, 2 = MOSI, 3 = DO, 4 = CLK, 5 = CSN, 6 = GND. Pin 2 is not connected on the encoder board. Affects Stage 1.
+- **DRV nSCS pull-up:** R38 10k from 3.3 V holds nSCS high from power-up, so PD2 doesn't need to be driven to keep the DRV deselected. Affects Stages 0 and 3.
+- **SPI clock idles undriven while the SPI is disabled.** RM0440 (SPI clock timing note) says the SCK idle level must be set by a pull resistor; with SPE = 0 the pin isn't driven. CubeMX init leaves SPE = 0 until the first transfer. That's what Stage 0 wants for SPI3. For Stages 1 and 3, firmware enables the SPI (SPE = 1) before the first chip-select falling edge, so the clock is already driven low when chip select goes low.
+- **TIM1 outputs before arming:** with MOE = 0 and CCxE = CCxNE = 0, RM0440 Table 282 gives "output disabled". The PWM pins then read low through the DRV's 100 kΩ input pull-downs. Affects the Stage 0 "all PWM pins low" check.
+- **CubeMX configuration for Stage 0 is already in place:** HSE 24 MHz, PLL M = 6, N = 85, R = 2 → 170 MHz, voltage scale 1 boost, flash latency 4; PA3 and PC3 outputs, low at boot; PC8 ENABLE and PC9 CAL low at boot; PD2 analog (undriven); PA4 high at boot; DAC3\_CH1 (internal) → OPAMP1 follower → PA2; SWO on PB3.
+- **SWO viewing:** the STM32Cube VS Code extension doesn't support SWO yet. SWO is read with STM32CubeProgrammer's SWV viewer or the Cortex-Debug extension, with the core clock set to 170 MHz. Affects Stage 0.
+- **Cortex-Debug setup:** with `servertype: stlink` (ST-LINK\_gdbserver), Cortex-Debug warns "SWO support is not available from the probe when using the ST-Link GDB server" and turns SWO off. `.vscode/launch.json` therefore uses ST's OpenOCD from STM32CubeIDE 2.1.1 (`interface/stlink.cfg`, `target/stm32g4x.cfg`, which creates the TPIU), with SWO at 2 MHz from a 170 MHz core clock, port 0 as a text console. With `interface/stlink.cfg` (the old `hla` driver), this OpenOCD build (0.12.0+dev, CubeIDE 2.4.400 plugin) recursed forever between `hla newtap` and the ST script `swj_newdap`, then died before reaching the probe. Fixed by using `interface/stlink-dap.cfg` (direct `st-link` DAP driver), which doesn't take that path. A temporary SWO test in `main.c` USER CODE 3 prints `SWO test N` every second and toggles LED4. With `stlink-dap.cfg`, the debug session connects, flashes, stops at `main()` and OpenOCD starts the SWO trace server ("Listening on port 50003 for tpiu\_swo\_trace connections"). **SWO confirmed working (2026-10-04):** the `SWO test N` lines appear in the Terminal panel, in a terminal named "SWO: SWO [type: console]" (Cortex-Debug shows console decoders as a terminal by default, not in the Output panel). Run: select "Debug (OpenOCD + SWO)", F5, F5 again past the stop at `main`, then open that terminal from the list on the right of the Terminal panel.
+
+### 2026-10-04: Stage 0 firmware written (not yet built or tested)
+
+- **Files:** `App/app_config.h` (`BRINGUP_STAGE 0`), `App/board.h`, `App/debug.c/h`, `App/app.c` plus `App/app.h` (prototypes for the two calls from `main.c`; not in the module table, added for the build). `CMakeLists.txt` adds the sources and the `App` include path. `main.c` calls `app_init()` in USER CODE 2 and `app_loop()` in USER CODE 3. The temporary SWO test is removed.
+- **CubeMX change required:** NVIC → Code generation → Hard fault interrupt → untick "Generate IRQ handler", then regenerate. `debug.c` provides a naked `HardFault_Handler` so it can find the stacked registers reliably; until the box is unticked the link fails with a duplicate `HardFault_Handler`.
+- **Decision, safe pins:** at boot `board_safe_pins()` sets TIM1 CCxE = CCxNE = 1 for channels 1–3 with MOE = 0, OSSI = 1 and OISx = 0, so TIM1 actively drives all six gate inputs low (RM0440 Table 282, MOE = 0 / OSSI = 1 row: off-state, inactive level). This is used instead of leaving them Hi-Z because the DRV8323's 100 kΩ pull-downs can't be relied on while the DRV is unpowered. MOE is never set here. ENABLE and CAL are forced low, SPI3 is disabled, and PD2 stays analog. `board_safe_pins_check()` reads all of this back.
+- **Fault handler:** on a HardFault it clears MOE, then drives ENABLE low, then prints pc, lr, psr, r0–r3, r12, CFSR, HFSR, MMFAR, BFAR and EXC\_RETURN over SWO. It halts at a breakpoint if a debugger is attached, otherwise it blinks LED4 fast. `STAGE0_FAULT_TEST 1` in `app_config.h` triggers a fault (undefined instruction) 5 s after boot to test it.
+- **Expected SWO at boot:** `BOOT stage=0`, `SCOPE dac3+opamp1 OK`, `CLK hse_rdy=1 pll_src=HSE sys_src=PLL m=6 n=85 r=2`, `CLK sysclk=170000000 hclk=170000000 pclk1=170000000 pclk2=170000000 OK`, `CYC 10ms=… expect>=1700000 OK`, `SAFE pwm_pins=0x00 err=0x00 OK`, then `ALIVE t=Ns task_max_us=…` every second.
+- **Expected signals:** LED4 1.000 Hz (500 ms on, 500 ms off); PA3 500.0 Hz square (toggled every 1 ms tick); PA2 triangle at 5 Hz, 100 ms up and 100 ms down, near 0–3.3 V (OPAMP1 output may stop slightly short of the rails).
+
+### 2026-10-04: Stage 0 passed
+
+- CubeMX: "Generate IRQ handler" unticked for Hard fault; `HardFault_Handler` is now only in `App/debug.c`.
+- The developer reported every Stage 0 check passed: boot log all OK, clock 170 MHz, SWO stable, PA2 triangle, PWM pins low, fault dump test. Measured values weren't recorded. `STAGE0_FAULT_TEST` set back to 0.
+
+### 2026-10-04: Stage 1 firmware written (not yet built or tested)
+
+- **Files:** `App/mt6701.c/h` (new), `App/app.c` (Stage 1 test mode), `App/app_config.h` (`BRINGUP_STAGE 1`), `CMakeLists.txt` (adds `mt6701.c`).
+- **SPI1 read (register access, usable from the control interrupt later):**
+  - At init the firmware checks SPI1 against CubeMX: mode 1, 12-bit, MSB first, software NSS, ÷32 = 5.31 MHz. It then sets SPE once with CS high, so CLK is driven low before the first CS edge.
+  - Each read: CS low, wait 200 ns (datasheet T\_H ≥ 100 ns), two dummy 12-bit frames, wait for both received and BSY clear, wait 200 ns (T\_L ≥ 0.5 × 188 ns), CS high. The wait has a 20 µs timeout.
+  - Word = frame1 << 12 | frame2.
+- **Decode:** angle = bits 23–10, status Mg\[3:0\] = bits 9–6, CRC = bits 5–0. The CRC-6 (x⁶ + x + 1, MSB first, initial value 0) covers the 18 angle + status bits. The datasheet doesn't state the initial value; 0 is assumed. If every frame fails CRC while the angle looks right, check this first, before suspecting the SPI mode.
+- **Checks and counters:** SPI timeouts, CRC errors, field too strong, field too weak (or the reserved code), loss of track, angle jumps. A jump is a step larger than 1,500 rpm allows per sample (409 counts at 1 kHz, minimum 64); 1,500 rpm is about twice the motor's 730 rpm no-load speed. A bad sample doesn't update position or speed. "Healthy" = good sample, field normal, no loss of track. Disarming on encoder faults comes in Stage 9.
+- **Position and speed:** multi-turn by unwrapping (turn count ±1 on wrap). Speed from a second-order PLL in mechanical rad/s, critically damped, 50 Hz natural frequency (Kp = 2ωn, Ki = ωn²).
+- **Stage 1 test mode:** read at 1 kHz in the main loop. PA3 is high during each read (scope trigger). PA2 shows the angle as a 0–3.3 V sawtooth per turn. LED4 1 Hz heartbeat. SWO: `ENC spi1 ... OK` and `ENC first raw=... crc=OK field=NORMAL` at boot; `ENC field=`, `ENC loss_of_track=` and `ENC push=` on change; status line every 200 ms: `ENC a= turns= rpm= ok= crc= jump= to= strong= weak= lot= rd_us=`.

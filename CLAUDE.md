@@ -71,6 +71,21 @@ memory.
    offset and direction, IDRIVE), put them in `motor_params.h` / the DRV config
    and note the stage and date in a comment.
 
+## Keep the plan current
+
+The plan is the living record of the bring-up. Update it as things happen; don't
+leave findings only in the conversation.
+
+- Add a dated entry to the plan's **Bring-up log** section (at the end) for every
+  finding, decision, schematic or datasheet discrepancy, measured value, stage
+  pass or fail, and fix. Name the stage it affects and cite the source (datasheet
+  section, schematic sheet, scope capture, the developer's report).
+- When an entry changes a fact, also correct the section that holds that fact
+  (pin map, hardware facts, register table, stage procedure, checklists), so the
+  plan never contradicts itself.
+- Tick checklist and prerequisite boxes when the developer confirms them.
+- When a stage passes, log it with the date and the key results.
+
 ## Hard rules
 
 - **Safety code is never removed, bypassed or weakened** to make a test pass.
