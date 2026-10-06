@@ -84,32 +84,23 @@ typedef enum
  * - SPI3 disabled, so SCLK/SDI aren't driven into the unpowered DRV
  *   (RM0440 SPI: SCK isn't driven while SPE = 0). PD2 stays analog (undriven).
  */
-static inline void board_safe_pins(void)
+static inline void board_tim1_outputs_safe(void)
 {
   TIM1->BDTR &= ~(TIM_BDTR_MOE | TIM_BDTR_AOE);
   TIM1->BDTR |= (TIM_BDTR_OSSI | TIM_BDTR_OSSR);
   TIM1->CR2 &= ~BOARD_TIM1_OIS_MASK;
   TIM1->CCER &= ~BOARD_TIM1_CCER_POL_MASK;
   TIM1->CCER |= BOARD_TIM1_CCER_EN_MASK;
+}
+
+static inline void board_safe_pins(void)
+{
+  board_tim1_outputs_safe();
 
   BOARD_DRV_ENABLE_PORT->BRR = BOARD_DRV_ENABLE_PIN;
   BOARD_DRV_CAL_PORT->BRR = BOARD_DRV_CAL_PIN;
 
   SPI3->CR1 &= ~SPI_CR1_SPE;
-}
-
-/**
- * Disarm: PWM outputs off first (MOE = 0, outputs to their low idle level),
- * then DRV ENABLE low, within the DRV's 40 us window (plan: Hard rules,
- * disarm order; DRV8323 datasheet 8.4.1.1). Together with the hardware
- * break, the only normal-operation path that clears MOE. Moves to pwm.c in
- * Stage 5. (board_safe_pins() at boot and the HardFault handler also clear
- * MOE directly.)
- */
-static inline void motor_disarm(void)
-{
-  TIM1->BDTR &= ~TIM_BDTR_MOE;
-  BOARD_DRV_ENABLE_PORT->BRR = BOARD_DRV_ENABLE_PIN;
 }
 
 /** Six gate-input pin levels, bit 0..5 = INHA, INHB, INHC, INLA, INLB, INLC. */

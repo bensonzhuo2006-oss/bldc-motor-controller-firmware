@@ -18,6 +18,9 @@
 #if BRINGUP_STAGE >= 4
 #include "fault.h"
 #endif
+#if BRINGUP_STAGE >= 5
+#include "pwm.h"
+#endif
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -102,8 +105,33 @@
 #define STAGE4_LOG_PERIOD_MS        1000UL
 #endif
 
+#if BRINGUP_STAGE >= 5
+/* Debugger commands: pause, set g_app_cmd, continue (Stage 5 onward).
+ * Arming is always an explicit action (plan: Rules for the bench, 4). */
+#define APP_CMD_NONE       0U
+#define APP_CMD_ARM        1U   /* arm from zero command, then ramp to the test duties */
+#define APP_CMD_DISARM     2U
+#define APP_CMD_SW_BREAK   3U   /* TIM1 software break */
+volatile uint32_t g_app_cmd;
+#endif
+
+#if BRINGUP_STAGE == 5
+/* Stage 5 test duties: a different duty per phase to identify each on the
+ * scope (plan Stage 5 step 1). Ramp from the zero command (50 %) over 500 ms. */
+#define STAGE5_DUTY_A        0.20f
+#define STAGE5_DUTY_B        0.50f
+#define STAGE5_DUTY_C        0.80f
+#define STAGE5_RAMP_MS       500U
+#define STAGE5_LOG_PERIOD_MS 1000UL
+#endif
+
 static uint32_t s_last_tick_ms;
 static uint32_t s_task_max_cycles;
+
+#if BRINGUP_STAGE == 5
+static uint32_t s_ramp_ms;
+static bool s_ramping;
+#endif
 
 #if BRINGUP_STAGE >= 4
 static uint32_t s_drv_wakes;
@@ -589,6 +617,13 @@ static void drv_monitor(uint32_t now_ms)
     }
   }
 
+#if BRINGUP_STAGE >= 5
+  if (pwm_take_break_event())
+  {
+    (void)fault_raise(FAULT_PWM_BREAK, pwm_break_events(), board_pwm_pins_read());
+  }
+#endif
+
   if (fault_active() && !s_fault_logged)
   {
     uint32_t c1;
@@ -605,9 +640,12 @@ static void drv_monitor(uint32_t now_ms)
       drv8323_fault_text(f1, f2, text, sizeof(text));
       debug_log("FAULT drv f1=0x%03X f2=0x%03X %s nfault=%s", (unsigned)f1, (unsigned)f2,
                 ok ? text : "READ_FAIL", drv8323_nfault_low() ? "LOW" : "high");
-      drv8323_sleep();
-      debug_log("FAULT disarmed, DRV asleep. Set g_fault_clear_request=1 in the debugger to clear.");
+      drv8323_sleep();   /* disarms first: outputs off, then ENABLE low */
     }
+#if BRINGUP_STAGE >= 5
+    motor_disarm();
+#endif
+    debug_log("FAULT disarmed, DRV asleep. Set g_fault_clear_request=1 in the debugger to clear.");
     s_fault_logged = true;
   }
 }
@@ -620,7 +658,10 @@ static void drv_monitor(uint32_t now_ms)
 static void drv_tick(void)
 {
   bool vm_ok = power_vm_ok();
-#if BRINGUP_STAGE >= 4
+#if BRINGUP_STAGE == 5
+  /* Stage 5: PWM into a sleeping DRV, so ENABLE is held low throughout. */
+  bool may_wake = false;
+#elif BRINGUP_STAGE >= 4
   bool may_wake = vm_ok && !fault_active();
 #else
   bool may_wake = vm_ok;
@@ -697,6 +738,80 @@ static void stage3_tick(uint32_t now_ms)
 }
 #endif
 
+/* ---- Stage 5 test mode ---------------------------------------------------- */
+
+#if BRINGUP_STAGE == 5
+static void stage5_tick(uint32_t now_ms)
+{
+  uint32_t cmd = g_app_cmd;
+  if (cmd != APP_CMD_NONE)
+  {
+    g_app_cmd = APP_CMD_NONE;
+    if (cmd == APP_CMD_ARM)
+    {
+      const char *reason;
+      pwm_set_duty(PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD);
+      TIM1->EGR = TIM_EGR_UG;   /* zero command in effect before arming */
+      if (motor_can_arm(&reason))
+      {
+        s_ramp_ms = 0U;
+        s_ramping = true;
+        debug_log("PWM armed from zero command; ramping to A=%u%% B=%u%% C=%u%% over %ums",
+                  (unsigned)(STAGE5_DUTY_A * 100.0f), (unsigned)(STAGE5_DUTY_B * 100.0f),
+                  (unsigned)(STAGE5_DUTY_C * 100.0f), STAGE5_RAMP_MS);
+      }
+      else
+      {
+        debug_log("PWM arm refused: %s", reason);
+      }
+    }
+    else if (cmd == APP_CMD_DISARM)
+    {
+      motor_disarm();
+      s_ramping = false;
+      debug_log("PWM disarmed by command: moe=%u pins=0x%02lX", pwm_is_armed() ? 1U : 0U, board_pwm_pins_read());
+    }
+    else if (cmd == APP_CMD_SW_BREAK)
+    {
+      pwm_software_break();
+      s_ramping = false;
+      debug_log("PWM software break: moe=%u pins=0x%02lX (expect moe=0 pins=0x00)",
+                pwm_is_armed() ? 1U : 0U, board_pwm_pins_read());
+    }
+    else
+    {
+      debug_log("CMD %lu unknown (1 arm, 2 disarm, 3 software break)", cmd);
+    }
+  }
+
+  if (s_ramping && pwm_is_armed())
+  {
+    s_ramp_ms++;
+    float k = (float)s_ramp_ms / (float)STAGE5_RAMP_MS;
+    if (k >= 1.0f)
+    {
+      k = 1.0f;
+      s_ramping = false;
+    }
+    pwm_set_duty(PWM_DUTY_ZERO_CMD + k * (STAGE5_DUTY_A - PWM_DUTY_ZERO_CMD),
+                 PWM_DUTY_ZERO_CMD + k * (STAGE5_DUTY_B - PWM_DUTY_ZERO_CMD),
+                 PWM_DUTY_ZERO_CMD + k * (STAGE5_DUTY_C - PWM_DUTY_ZERO_CMD));
+  }
+
+  if ((now_ms % STAGE5_LOG_PERIOD_MS) == 0U)
+  {
+    uint32_t a;
+    uint32_t b;
+    uint32_t c;
+    pwm_get_duty_permille(&a, &b, &c);
+    debug_log("PWM armed=%u duty_permille A=%lu B=%lu C=%lu enable=%u nfault=%s breaks=%lu fault=%s",
+              pwm_is_armed() ? 1U : 0U, a, b, c,
+              ((BOARD_DRV_ENABLE_PORT->ODR & BOARD_DRV_ENABLE_PIN) != 0U) ? 1U : 0U,
+              drv8323_nfault_low() ? "LOW" : "high", pwm_break_events(), fault_name(fault_first()));
+  }
+}
+#endif
+
 /* ---- Entry points --------------------------------------------------------- */
 
 void app_init(void)
@@ -745,6 +860,16 @@ void app_init(void)
             drv_cfg_ok ? "OK" : "FAIL");
 #endif
 
+#if BRINGUP_STAGE >= 5
+  const char *what;
+  bool pwm_ok = pwm_init(&what);
+  debug_log("PWM tim1 center 20kHz dt=100ns brk=PB10 low trgo2=OC4REF ccr4=4200 %s (%s); dbg freeze on, counter running, moe=%u",
+            pwm_ok ? "OK" : "FAIL", what, pwm_is_armed() ? 1U : 0U);
+#endif
+#if BRINGUP_STAGE == 5
+  debug_log("STAGE5 DRV held asleep. Commands: set g_app_cmd = 1 arm, 2 disarm, 3 software break");
+#endif
+
   s_last_tick_ms = HAL_GetTick();
 }
 
@@ -782,6 +907,8 @@ void app_loop(void)
     stage3_tick(s_last_tick_ms);
 #elif BRINGUP_STAGE == 4
     stage4_tick(s_last_tick_ms);
+#elif BRINGUP_STAGE == 5
+    stage5_tick(s_last_tick_ms);
 #endif
     uint32_t elapsed = debug_cycles() - start;
     if (elapsed > s_task_max_cycles)

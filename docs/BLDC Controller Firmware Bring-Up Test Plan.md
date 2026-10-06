@@ -749,3 +749,30 @@ Dated record of findings, decisions and measured results, newest last. Each entr
   - `task_max_us` = 3,929 µs: the configure sequence (about 20 SPI words plus calibration plus logging) runs once per wake.
   - Still to do: complete about 20 SW1 cycles, SOA/SOB/SOC with a meter (expect about 1.65 V), and the optional nFAULT-short check of the fault latch.
 - **Stage 4 test mode:** after each wake, `DRV wake #N ... wake_pulses_ignored=… cfg OK ...` and a register dump line. A status line every second: state, nFAULT, fault registers, wakes / cfg\_ok / cfg\_fail / checks, nf\_ev / nf\_ignored, latched fault.
+
+### 2026-10-04: Stage 4 passed (developer's call)
+
+- The developer reports everything good. The SW1 cycle count, the SOA/SOB/SOC meter readings and the optional nFAULT-short check weren't sent, so the values aren't recorded.
+
+### 2026-10-04: Stage 5 firmware written (not yet built or tested)
+
+- **Files:** `App/pwm.c/h` (new), `App/board.h` (`motor_disarm()` moved to `pwm.c`; TIM1 safe-output part split out as `board_tim1_outputs_safe()`), `App/drv8323.c` (includes `pwm.h`), `App/fault.c/h` (FAULT\_PWM\_BREAK), `App/app.c` (PWM init, debugger commands, Stage 5 test mode; DRV held asleep in Stage 5), `App/app_config.h` (`BRINGUP_STAGE 5`), `CMakeLists.txt` (adds `pwm.c`). No CubeMX change.
+- **TIM1 checked at boot against the plan:**
+  - ARR = 4250, center-aligned mode 1, PSC = 0, CKD = 0.
+  - DTG = 17 (17 × 5.88 ns = 100 ns, RM0440 BDTR DTG\[7:5\] = 0xx).
+  - BKE = 1, BKP = 0 (active low), AOE = 0.
+  - MMS2 = OC4REF, CCR4 = 4200.
+  - Channels 1–4 in PWM mode 1.
+- **Debugger freeze:** DBGMCU APB2FZ DBG\_TIM1\_STOP set at boot. RM0440 (TIM1 debug mode): with the counter stopped, "the outputs are disabled (as if the MOE bit was reset)", and with OSSI = 1 they go to their inactive (low) level. MOE itself stays set, so PWM resumes after the halt.
+- **Idle:** MOE = 0, OSSI = OSSR = 1, OISx = 0, CCxE = CCxNE = 1 → all six outputs driven low; the counter runs. Duties start at 50 % (zero command) and CCRs are loaded with UG. BIF cleared, then BIE enabled: `HAL_TIMEx_BreakCallback` latches the event, and the main loop raises FAULT\_PWM\_BREAK. The fault response calls `motor_disarm()`, and the fault stays latched until `g_fault_clear_request`.
+- **`motor_can_arm()`** is the only code that sets MOE. It refuses if:
+  - already armed, or a fault is latched;
+  - the debug freeze is off, OSSI/OSSR aren't set, AOE is set, idle levels aren't low, or the counter isn't running;
+  - the duties aren't equal (not a zero command);
+  - nFAULT/BKIN is low;
+  - **Stage 5 only:** DRV ENABLE is high;
+  - **Stage 6 onward:** VM\_OK is missing or the DRV isn't configured.
+
+  It clears BIF, sets MOE, and confirms MOE actually set.
+- **Duty writes:** `pwm_set_duty(a, b, c)` clamps to \[0, 0.93\] and writes CCR3/CCR2/CCR1 for A/B/C (register writes only, safe in the interrupt).
+- **Stage 5 test mode:** the DRV is held asleep (ENABLE low). Debugger commands via `g_app_cmd`: 1 = arm from the zero command and ramp over 500 ms to A = 20 %, B = 50 %, C = 80 %; 2 = disarm; 3 = software break (EGR.BG). Status line every second: armed, duties in permille, ENABLE, nFAULT, break count, fault.

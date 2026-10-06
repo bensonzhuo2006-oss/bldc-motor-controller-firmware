@@ -8,6 +8,7 @@
  */
 #include "drv8323.h"
 #include "board.h"
+#include "pwm.h"
 #include "main.h"
 #include <stdio.h>
 #include <string.h>

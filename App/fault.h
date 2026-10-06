@@ -26,6 +26,7 @@ typedef enum
   FAULT_DRV_FAULT_BITS,      /* fault status registers not clear */
   FAULT_DRV_SPI,             /* SPI3 transfer timed out */
   FAULT_DRV_WAKE,            /* nFAULT still low after the wake time */
+  FAULT_PWM_BREAK,           /* TIM1 break (nFAULT on BKIN, or software break) */
   FAULT_COUNT
 } fault_code_t;
 
