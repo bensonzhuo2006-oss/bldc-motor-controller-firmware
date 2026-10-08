@@ -53,13 +53,15 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/fault.c
     App/pwm.c
     App/cursense.c
+    App/ctrl.c
+    App/foc_math.c
 )
 
 # The 20 kHz control interrupt path is built optimised even in Debug: at -O0
 # it took 6.6 us per call, over the plan's 10 % budget (5 us of 50 us;
 # Bring-up log 2026-10-08, Stage 7). The rest stays at -O0 for debugging.
 # Source options come after CMAKE_C_FLAGS_DEBUG on the command line, so -O2 wins.
-set_source_files_properties(App/cursense.c App/pwm.c App/debug.c
+set_source_files_properties(App/cursense.c App/pwm.c App/debug.c App/ctrl.c App/foc_math.c
     PROPERTIES COMPILE_OPTIONS "-O2")
 
 # Add include paths

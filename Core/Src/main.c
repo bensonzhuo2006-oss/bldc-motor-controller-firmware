@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
+#include "cordic.h"
 #include "dac.h"
 #include "opamp.h"
 #include "spi.h"
@@ -99,6 +100,7 @@ int main(void)
   MX_TIM1_Init();
   MX_DAC3_Init();
   MX_OPAMP1_Init();
+  MX_CORDIC_Init();
   /* USER CODE BEGIN 2 */
   app_init();
   /* USER CODE END 2 */

@@ -23,6 +23,11 @@
 #endif
 #if BRINGUP_STAGE >= 7
 #include "cursense.h"
+#include "ctrl.h"
+#endif
+#if BRINGUP_STAGE >= 8
+#include "foc_math.h"
+#include "motor_params.h"
 #endif
 #include <stdbool.h>
 #include <stdint.h>
@@ -187,11 +192,49 @@ volatile uint32_t g_drv_idrive = DRV_CFG_IDRIVE;
 volatile uint32_t g_phase_off;
 #endif
 
+#if BRINGUP_STAGE == 8
+/* Stage 8 test mode: a fixed voltage vector into the motor at rest (plan
+ * Stage 8). Set from the debugger: amplitude g_vec_v (phase-voltage
+ * amplitude, V), angle g_vec_deg (electrical), common-mode duty shift
+ * g_duty_shift (step 7: shift until the highest duty reaches the 93 % cap),
+ * overcurrent trip g_oc_trip (1.0 A until the meter check, then 1.5 A). */
+#define APP_CMD_LSTEP        8U       /* inductance step, g_vec_v -> g_vstep_v */
+#define VEC_V_INIT           0.5f     /* procedure step 2 */
+#define VEC_V_MAX            1.2f     /* covers the 1.0 V step; 1.2 V / 2.2 Ohm = 0.55 A, under the 1 A trip */
+#define VEC_SLEW_V_PER_MS    0.001f   /* 1 V/s: every arm starts at 0 V and ramps */
+#define VEC_SHIFT_MAX        0.43f    /* 0.5 + 0.43 = 0.93: largest useful shift */
+#define VEC_LOG_PERIOD_MS    1000UL
+#define DEG_TO_RAD           0.0174532925199f
+#define RAD_PER_TURN         6.28318530718f
+/* Inductance fit (step 7): phase A current averaged over 100 samples before
+ * the step and over the last 100 of the capture (20-25 ms after it, many
+ * time constants), 63.2 % crossing for tau. The step reaches the motor at
+ * the PWM update after the trigger interrupt, half a sample before n = 512. */
+#define LFIT_AVG_SAMPLES     100U
+#define LFIT_STEP_AT         511.5f
+#define LFIT_TAU_FRACTION    0.632121f
+#define CTRL_SAMPLE_S        50e-6f   /* control interrupt period */
+
+volatile float g_vec_v = VEC_V_INIT;
+volatile float g_vec_deg = 0.0f;
+volatile float g_duty_shift = 0.0f;
+volatile float g_oc_trip = MOTOR_OC_TRIP_DEFAULT_A;
+volatile float g_vstep_v = 1.0f;      /* procedure step 7 */
+#endif
+
 static uint32_t s_last_tick_ms;
 static uint32_t s_task_max_cycles;
 
 #if APP_TEST_MODE
 static float s_duty[PHASE_COUNT];   /* applied duties */
+#endif
+#if BRINGUP_STAGE >= 8
+static float s_trip_applied;        /* overcurrent trip in force, A */
+#endif
+#if BRINGUP_STAGE == 8
+static bool  s_foc_ok;
+static float s_vec_v;               /* applied amplitude, slewed */
+static bool  s_lstep_active;        /* waiting for the step's capture */
 #endif
 #if APP_BRIDGE_TOOLS
 static uint32_t s_sweep_step;
@@ -850,11 +893,24 @@ static void ctrl_tick(uint32_t now_ms)
     }
   }
 
+#if BRINGUP_STAGE >= 8
+  uint32_t oc_phase;
+  float oc_amps;
+  if (ctrl_take_oc_event(&oc_phase, &oc_amps))
+  {
+    /* The interrupt has already disarmed; latch and log (ctx: phase 0-2 = A-C,
+     * current in mA as a signed 32-bit value). */
+    debug_log("OVERCURRENT phase %c %ld mA (trip %ld mA): disarmed in the control interrupt",
+              (char)('A' + oc_phase), (long)(oc_amps * AMPS_TO_MA), (long)(s_trip_applied * AMPS_TO_MA));
+    (void)fault_raise(FAULT_OVERCURRENT, oc_phase, (uint32_t)(int32_t)(oc_amps * AMPS_TO_MA));
+  }
+#endif
+
   (void)debug_capture_dump_tick();
 
-#if BRINGUP_STAGE == 7
-  /* Zero-current level and noise per phase over the last second (plan
-   * Stage 7 step 3), control interrupt time and load (step 2). */
+#if BRINGUP_STAGE >= 7
+  /* Current level and noise per phase over the last second (plan Stage 7
+   * step 3; Stage 8 steps 3-5), control interrupt time and load. */
   if ((now_ms % CUR_LOG_PERIOD_MS) == 0U)
   {
     cursense_stats_t st;
@@ -871,28 +927,261 @@ static void ctrl_tick(uint32_t now_ms)
     {
       ma[ph] = (int32_t)((st.mean[ph] - off[ph]) * CURSENSE_AMPS_PER_COUNT * AMPS_TO_MA);
     }
-    uint32_t isr = cursense_isr_max_cycles();
+    /* Interrupt time over this second: mean and max; load from the max. */
+    uint32_t isr_mean = st.isr_mean_cycles;
+    uint32_t isr = st.isr_max_cycles;
+    uint32_t worst = cursense_isr_max_cycles();
     uint32_t load_pm = (isr * 1000UL) / CTRL_PERIOD_CYCLES;   /* permille */
     uint32_t rms10[PHASE_COUNT];
     for (uint32_t ph = 0U; ph < PHASE_COUNT; ph++)
     {
       rms10[ph] = (uint32_t)(st.rms[ph] * 10.0f + 0.5f);       /* tenths of a count */
     }
-    debug_log("CUR mA=%ld/%ld/%ld pp=%u/%u/%u rms=%lu.%lu/%lu.%lu/%lu.%lu off=%u/%u/%u valid=%u n=%lu",
+    debug_log("CUR mA=%ld/%ld/%ld sum=%ld pp=%u/%u/%u rms=%lu.%lu/%lu.%lu/%lu.%lu off=%u/%u/%u valid=%u n=%lu",
               (long)ma[PHASE_A], (long)ma[PHASE_B], (long)ma[PHASE_C],
+              (long)(ma[PHASE_A] + ma[PHASE_B] + ma[PHASE_C]),
               (unsigned)(st.max[PHASE_A] - st.min[PHASE_A]), (unsigned)(st.max[PHASE_B] - st.min[PHASE_B]),
               (unsigned)(st.max[PHASE_C] - st.min[PHASE_C]),
               rms10[PHASE_A] / 10UL, rms10[PHASE_A] % 10UL, rms10[PHASE_B] / 10UL, rms10[PHASE_B] % 10UL,
               rms10[PHASE_C] / 10UL, rms10[PHASE_C] % 10UL,
               (unsigned)(off[PHASE_A] + 0.5f), (unsigned)(off[PHASE_B] + 0.5f), (unsigned)(off[PHASE_C] + 0.5f),
               cursense_offsets_valid() ? 1U : 0U, st.samples);
-    debug_log("CTRL isr_max=%lu.%luus load=%lu.%lu%% late=%lu",
+    debug_log("CTRL isr mean=%lu.%luus max=%lu.%luus (1 s) worst=%lu.%luus (since boot) load=%lu.%lu%% late=%lu",
+              isr_mean / DEBUG_CYCLES_PER_US, (isr_mean % DEBUG_CYCLES_PER_US) * 10UL / DEBUG_CYCLES_PER_US,
               isr / DEBUG_CYCLES_PER_US, (isr % DEBUG_CYCLES_PER_US) * 10UL / DEBUG_CYCLES_PER_US,
+              worst / DEBUG_CYCLES_PER_US, (worst % DEBUG_CYCLES_PER_US) * 10UL / DEBUG_CYCLES_PER_US,
               load_pm / 10UL, load_pm % 10UL, cursense_late_count());
   }
-#else
-  (void)now_ms;
 #endif
+}
+#endif
+
+/* ---- Stage 8 test mode: fixed voltage vector ------------------------------- */
+
+#if BRINGUP_STAGE == 8
+static float vec_target(void)
+{
+  float v = g_vec_v;
+  if (!(v >= 0.0f))   /* also catches NaN */
+  {
+    return 0.0f;
+  }
+  return (v > VEC_V_MAX) ? VEC_V_MAX : v;
+}
+
+static float vec_theta(void)
+{
+  float deg = g_vec_deg;
+  if (!(deg >= -360.0f) || !(deg <= 360.0f))   /* NaN or out of range: 0 */
+  {
+    deg = 0.0f;
+  }
+  return deg * DEG_TO_RAD;
+}
+
+static float vec_shift(void)
+{
+  float s = g_duty_shift;
+  if (!(s >= 0.0f))
+  {
+    return 0.0f;
+  }
+  return (s > VEC_SHIFT_MAX) ? VEC_SHIFT_MAX : s;
+}
+
+static void vec_arm(void)
+{
+  const char *reason;
+  if (!s_foc_ok)
+  {
+    debug_log("VEC arm refused: CORDIC not running (CubeMX: activate CORDIC)");
+    return;
+  }
+  s_vec_v = 0.0f;                                  /* zero voltage vector, then ramp */
+  ctrl_set_vector(0.0f, vec_theta(), 0.0f);
+  pwm_zero_command();
+  if (motor_can_arm(&reason))
+  {
+    debug_log("VEC armed from 0 V; ramping to %lu mV at %ld deg, trip %lu mA",
+              (uint32_t)(vec_target() * 1000.0f), (long)g_vec_deg, (uint32_t)(s_trip_applied * 1000.0f));
+  }
+  else
+  {
+    debug_log("VEC arm refused: %s", reason);
+  }
+}
+
+/* Plan Stage 8 step 7: tau from the phase A step response in the capture,
+ * L = tau x R. Assumes the vector is at 0 deg (phase A carries the full
+ * current, the rotor is aligned so there's no torque). */
+static void vec_lstep_fit(void)
+{
+  float off[PHASE_COUNT];
+  uint16_t s[3];
+  float i0 = 0.0f;
+  float i1 = 0.0f;
+  cursense_offsets(off);
+
+  for (uint32_t n = DEBUG_CAPTURE_TRIGGER - LFIT_AVG_SAMPLES; n < DEBUG_CAPTURE_TRIGGER; n++)
+  {
+    (void)debug_capture_get(n, s);
+    i0 += ((float)s[PHASE_A] - off[PHASE_A]) * CURSENSE_AMPS_PER_COUNT;
+  }
+  for (uint32_t n = DEBUG_CAPTURE_LEN - LFIT_AVG_SAMPLES; n < DEBUG_CAPTURE_LEN; n++)
+  {
+    (void)debug_capture_get(n, s);
+    i1 += ((float)s[PHASE_A] - off[PHASE_A]) * CURSENSE_AMPS_PER_COUNT;
+  }
+  i0 /= (float)LFIT_AVG_SAMPLES;
+  i1 /= (float)LFIT_AVG_SAMPLES;
+
+  float target = i0 + (LFIT_TAU_FRACTION * (i1 - i0));
+  float prev = i0;
+  float t_cross = -1.0f;
+  for (uint32_t n = DEBUG_CAPTURE_TRIGGER; n < DEBUG_CAPTURE_LEN; n++)
+  {
+    (void)debug_capture_get(n, s);
+    float i = ((float)s[PHASE_A] - off[PHASE_A]) * CURSENSE_AMPS_PER_COUNT;
+    if (i >= target)
+    {
+      float frac = ((i - prev) > 0.0f) ? ((target - prev) / (i - prev)) : 0.0f;
+      t_cross = ((float)n - 1.0f + frac) - LFIT_STEP_AT;
+      break;
+    }
+    prev = i;
+  }
+
+  if ((t_cross <= 0.0f) || ((i1 - i0) < 0.05f))
+  {
+    debug_log("LFIT failed: I %ld -> %ld mA, no clean 63%% crossing (vector at 0 deg? rotor aligned?)",
+              (long)(i0 * AMPS_TO_MA), (long)(i1 * AMPS_TO_MA));
+    return;
+  }
+  float tau = t_cross * CTRL_SAMPLE_S;
+  float l_h = tau * MOTOR_R_PHASE_OHM;
+  float r_dc = (i1 > 0.01f) ? (g_vstep_v / i1) : 0.0f;
+  debug_log("LFIT I %ld -> %ld mA, tau=%lu us, L=%lu uH (R=%lu mOhm from motor_params; V/I=%lu mOhm)",
+            (long)(i0 * AMPS_TO_MA), (long)(i1 * AMPS_TO_MA), (uint32_t)(tau * 1e6f),
+            (uint32_t)(l_h * 1e6f), (uint32_t)(MOTOR_R_PHASE_OHM * 1000.0f), (uint32_t)(r_dc * 1000.0f));
+}
+
+static void vec_command(uint32_t cmd)
+{
+  switch (cmd)
+  {
+    case APP_CMD_ARM:
+      vec_arm();
+      break;
+    case APP_CMD_DISARM:
+      motor_disarm();
+      s_lstep_active = false;
+      debug_log("VEC disarmed by command: moe=%u pins=0x%02lX", pwm_is_armed() ? 1U : 0U, board_pwm_pins_read());
+      break;
+    case APP_CMD_SW_BREAK:
+      pwm_software_break();
+      s_lstep_active = false;
+      debug_log("PWM software break: moe=%u pins=0x%02lX", pwm_is_armed() ? 1U : 0U, board_pwm_pins_read());
+      break;
+    case APP_CMD_CAPTURE:
+      debug_capture_trigger();
+      debug_log("CAP triggered; g_app_cmd = 7 dumps it once full (25 ms)");
+      break;
+    case APP_CMD_DUMP:
+      if (!debug_capture_dump_start())
+      {
+        debug_log("CAP dump refused: no finished capture (g_app_cmd = 6 first)");
+      }
+      break;
+    case APP_CMD_LSTEP:
+    {
+      float v1 = g_vstep_v;
+      float v0 = vec_target();
+      float settle = s_vec_v - v0;
+      if (!pwm_is_armed() || (settle > VEC_SLEW_V_PER_MS) || (settle < -VEC_SLEW_V_PER_MS) ||
+          !(v1 > v0) || (v1 > VEC_V_MAX))
+      {
+        debug_log("LSTEP refused: arm, wait for the ramp, and set g_vstep_v above g_vec_v (max %lu mV)",
+                  (uint32_t)(VEC_V_MAX * 1000.0f));
+        break;
+      }
+      if (debug_capture_done())
+      {
+        debug_log("LSTEP refused: a finished capture is waiting; dump it (g_app_cmd = 7) first");
+        break;
+      }
+      s_vec_v = v1;
+      g_vec_v = v1;            /* hold the new level after the step */
+      ctrl_vector_step(v1);    /* applied and captured in the same control interrupt */
+      s_lstep_active = true;
+      debug_log("LSTEP %lu -> %lu mV at %ld deg; fit follows in 25 ms", (uint32_t)(v0 * 1000.0f),
+                (uint32_t)(v1 * 1000.0f), (long)g_vec_deg);
+      break;
+    }
+    default:
+      debug_log("CMD %lu unknown", cmd);
+      break;
+  }
+}
+
+static void vec_tick(uint32_t now_ms)
+{
+  float t = ctrl_set_trip(g_oc_trip);
+  if (t != s_trip_applied)
+  {
+    s_trip_applied = t;
+    debug_log("OC trip now %lu mA (asked %ld mA; range %lu-%lu mA)", (uint32_t)(t * 1000.0f),
+              (long)(g_oc_trip * 1000.0f), (uint32_t)(MOTOR_OC_TRIP_MIN_A * 1000.0f),
+              (uint32_t)(MOTOR_OC_TRIP_STAGE_MAX_A * 1000.0f));
+  }
+
+  uint32_t cmd = g_app_cmd;
+  if (cmd != APP_CMD_NONE)
+  {
+    g_app_cmd = APP_CMD_NONE;
+    vec_command(cmd);
+  }
+
+  if (pwm_is_armed())
+  {
+    float target = vec_target();
+    float step = target - s_vec_v;
+    if (step > VEC_SLEW_V_PER_MS)
+    {
+      step = VEC_SLEW_V_PER_MS;
+    }
+    else if (step < -VEC_SLEW_V_PER_MS)
+    {
+      step = -VEC_SLEW_V_PER_MS;
+    }
+    s_vec_v += step;
+    ctrl_set_vector(s_vec_v, vec_theta(), vec_shift());
+  }
+  else
+  {
+    s_vec_v = 0.0f;
+  }
+
+  if (s_lstep_active && debug_capture_done())
+  {
+    s_lstep_active = false;
+    vec_lstep_fit();
+  }
+
+  if ((now_ms % VEC_LOG_PERIOD_MS) == 0U)
+  {
+    float vph[PHASE_COUNT];
+    float dmax;
+    ctrl_last_output(vph, &dmax);
+    /* Expected currents from Ohm's law on the commanded phase voltages
+     * (plan Stage 8 pass: V/R within about 15 %). */
+    debug_log("VEC armed=%u V=%lu mV deg=%ld shift=%lu dmax=%lu expect mA=%ld/%ld/%ld trip=%lu fault=%s",
+              pwm_is_armed() ? 1U : 0U, (uint32_t)(s_vec_v * 1000.0f), (long)g_vec_deg,
+              (uint32_t)(vec_shift() * 1000.0f), (uint32_t)(dmax * 1000.0f),
+              (long)(vph[PHASE_A] / MOTOR_R_PHASE_OHM * AMPS_TO_MA),
+              (long)(vph[PHASE_B] / MOTOR_R_PHASE_OHM * AMPS_TO_MA),
+              (long)(vph[PHASE_C] / MOTOR_R_PHASE_OHM * AMPS_TO_MA),
+              (uint32_t)(s_trip_applied * 1000.0f), fault_name(fault_first()));
+  }
 }
 #endif
 
@@ -1173,6 +1462,11 @@ void app_init(void)
   debug_log("STAGE%d targets g_duty_a/b/c (0..0.93), now A=%u B=%u C=%u permille", BRINGUP_STAGE,
             (unsigned)(g_duty_a * 1000.0f), (unsigned)(g_duty_b * 1000.0f), (unsigned)(g_duty_c * 1000.0f));
   debug_log("STAGE%d g_phase_off: 1 = A, 2 = B, 4 = C held off (both FETs) from the next arm", BRINGUP_STAGE);
+#elif BRINGUP_STAGE == 8
+  s_foc_ok = foc_init();
+  debug_log("FOC cordic cos/sin q1.31 24 iterations %s", s_foc_ok ? "OK" : "FAIL (CubeMX: activate CORDIC)");
+  debug_log("STAGE8 g_app_cmd: 1 arm, 2 disarm, 3 sw break, 6 capture, 7 dump, 8 L step");
+  debug_log("STAGE8 g_vec_v (V, max 1.2) g_vec_deg g_duty_shift (max 0.43) g_oc_trip (A, 0.1-1.5) g_vstep_v");
 #endif
 
   s_last_tick_ms = HAL_GetTick();
@@ -1217,6 +1511,8 @@ void app_loop(void)
     stage4_tick(s_last_tick_ms);
 #elif APP_TEST_MODE
     test_tick(s_last_tick_ms);
+#elif BRINGUP_STAGE == 8
+    vec_tick(s_last_tick_ms);
 #endif
     uint32_t elapsed = debug_cycles() - start;
     if (elapsed > s_task_max_cycles)

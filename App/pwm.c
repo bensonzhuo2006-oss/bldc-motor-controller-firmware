@@ -34,6 +34,10 @@
  * connected; PVD isn't configured. */
 #define PWM_SYS_BREAK_SOURCES  (SYSCFG_CFGR2_CLL | SYSCFG_CFGR2_SPL | SYSCFG_CFGR2_ECCL)
 
+/* MOE readback after setting it: a few reads cover the resynchronisation
+ * delay (a few APB cycles, RM0440 TIM1 break). */
+#define PWM_MOE_READBACK_TRIES 16U
+
 /* Break flags: external/software break and system break. */
 #define PWM_BREAK_FLAGS        (TIM_SR_BIF | TIM_SR_SBIF)
 
@@ -195,8 +199,20 @@ bool motor_can_arm(const char **reason)
   TIM1->DIER |= TIM_DIER_BIE;       /* break events latched while armed */
   TIM1->BDTR |= TIM_BDTR_MOE;
   __set_PRIMASK(primask);
-  if (!pwm_is_armed())
+
+  /* MOE is written on the asynchronous path: a read straight after the
+   * write can still show 0 (RM0440 TIM1 break: "a delay must be inserted
+   * (dummy instruction) before reading it correctly"). Poll briefly; if it
+   * really didn't set, force the outputs off so the state is never "refused
+   * but armed". */
+  bool on = false;
+  for (uint32_t i = 0U; (i < PWM_MOE_READBACK_TRIES) && !on; i++)
   {
+    on = pwm_is_armed();
+  }
+  if (!on)
+  {
+    motor_disarm();
     *reason = "MOE did not set";
     return false;
   }

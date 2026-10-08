@@ -131,8 +131,8 @@ These numbers come from the DRV8323, MT6701 and STM32G491 datasheets and the mot
 | --- | --- | --- |
 | Pole pairs | 11 (22 poles, 24 slots) | 11 |
 | Winding | Delta | Converted to an equivalent wye model |
-| Resistance | 4.8 Ω per winding | About 1.6 Ω per phase (wye), 3.2 Ω line-to-line |
-| Inductance | 2.6 mH per winding | About 0.87 mH per phase (wye) |
+| Resistance | 4.8 Ω (read as per winding) | **Measured 4.4 Ω line-to-line (Stage 8, 2026-10-08): 2.2 Ω per phase (wye).** That fits the 4.8 Ω spec being line-to-line, not per delta winding (which would give 3.2 Ω). |
+| Inductance | 2.6 mH (read as per winding) | TODO_MEASURED (Stage 8 step 7). If line-to-line like the resistance: 1.3 mH per phase (wye); if per delta winding: 0.87 mH |
 | Kv | 61 rpm/V | About 730 rpm unloaded at 12 V. Kv refers to line voltage, so with Vq as the phase-voltage amplitude, no-load speed ≈ Kv × √3 × Vq. Theoretical maximum Vq = 12 V ÷ √3 ≈ 6.9 V; with the 93% duty cap the usable maximum is about 6.0 V, so top no-load speed is about 630 rpm |
 | Back-EMF constant | 0.1562 V/(rad/s) | Matches Kv, a consistency check on the datasheet |
 | Rated / max current | 0.65 A / 4 A | Iq clamp 4 A peak, 0.65 A continuous through a heating (I²t) model |
@@ -147,7 +147,9 @@ K_p = L \cdot \omega_{bw} \approx 0.87\,\text{mH} \times 2\pi \cdot 1000 \approx
 K_i = R \cdot \omega_{bw} \approx 1.6\,\Omega \times 2\pi \cdot 1000 \approx 10{,}000\ \text{V/(A·s)}
 ```
 
-With 12 V DC across two leads, stall current is about 12 V ÷ 3.2 Ω ≈ 3.75 A. Full space-vector modulation without the duty cap would give 6.93 V ÷ 1.6 Ω ≈ 4.3 A at standstill; with the 93% cap the maximum is about 6.0 V, or 3.7 A. That is close enough to the 4 A maximum that the current clamp and software trip, not the motor's resistance, must limit current. The encoder-to-electrical offset depends on how the magnet is mounted, so Stage 10 measures it.
+The gains above use the original 1.6 Ω / 0.87 mH estimate. With the measured 2.2 Ω (and 1.3 mH if confirmed) they become about 8.2 V/A and 13,800 V/(A·s); Stage 13 recomputes them from the measured R and L.
+
+With 12 V DC across two leads, stall current is about 12 V ÷ 4.4 Ω ≈ 2.7 A (measured R; 3.75 A with the original 3.2 Ω estimate). With the 93% cap the largest vector is about 6.0 V, or 6.0 ÷ 2.2 ≈ 2.7 A at standstill. That is below the 4 A maximum, but the current clamp and software trip, not the motor's resistance, still set the limit: winding resistance rises as the motor heats. The encoder-to-electrical offset depends on how the magnet is mounted, so Stage 10 measures it.
 
 ## Safety: protection layers
 
@@ -225,7 +227,7 @@ IDRIVE (bits 7–0 of 0x03 and 0x04) can be retuned at run time in Stage 6. The 
 | Dead time | Gap between GHx falling and GLx rising on two scope channels: a clear non-overlap with margin (the DRV's and MCU's dead times overlap rather than simply adding) | 6 |
 | Bidirectional reference | SOA, SOB and SOC sit at about 1.65 V with no current (unidirectional mode would put them near 3.0 V, VREF − 0.3 V) | 4 |
 | Offset calibration | SOx stays at about 1.65 V during calibration, and the ADC offsets land near 2048 counts afterwards | 4, 7 |
-| Gain 40 V/V | A 0.5 V vector into 1.6 Ω gives about 0.31 A, so SOA should rise about 62 mV above its offset (0.31 A × 5 mΩ × 40; current into the motor raises SOx). | 8 |
+| Gain 40 V/V | A 0.5 V vector into the measured 2.2 Ω gives about 0.23 A, so SOA should rise about 45 mV (56 counts) above its offset (0.23 A × 5 mΩ × 40; current into the motor raises SOx). | 8 |
 | Fault reporting | Shorting nFAULT to GND trips the break; fault registers read clean after wake | 6 |
 | VDS trip level | Register readback only. A real test needs about 16–21 A through a FET | — |
 
@@ -402,14 +404,14 @@ These stages switch the MOSFETs for the first time, first into a sleeping driver
   - Software overcurrent trip in the control interrupt: about 1 A until the current readings are confirmed against a multimeter, then 1.5 A. Until that check passes, the readings that feed the trip are unproven.
   - Space-vector PWM producing a fixed voltage vector at a chosen angle.
 - **Procedure:**
-  1. First measure line-to-line resistance with a meter; expect about 3.2 Ω. If it reads 4.8 Ω, update R and L in `motor_params.h`.
+  1. First measure line-to-line resistance with a meter; expect about 3.2 Ω. If it reads 4.8 Ω, update R and L in `motor_params.h`. (Done 2026-10-08: 4.4 Ω, R = 2.2 Ω wye in `motor_params.h`. The expected values below use 2.2 Ω.)
   2. Apply a 0.5 V vector (phase-voltage amplitude) at 0°, 120° and 240°.
   3. Put a multimeter (DC amps) in series with the phase A lead and compare it with the measured Ia. The vector is DC, so the meter reads phase current directly; this is the independent check of the current readings. Then compare with Ohm's law. The supply current barely changes (about 20 mA more at 12 V, from power balance), so treat it only as a sanity check.
-  4. Check each current channel matches its PWM phase and sign. At 0°: Ia ≈ +0.31 A, Ib and Ic ≈ −0.16 A each. At 120°: Ib is the large positive one. At 240°: Ic is. If the large current is on the wrong channel or has the wrong sign, fix the mapping before going on: this is the most common cause of a current loop that fights itself.
+  4. Check each current channel matches its PWM phase and sign. At 0°: Ia ≈ +0.23 A, Ib and Ic ≈ −0.11 A each (2.2 Ω). At 120°: Ib is the large positive one. At 240°: Ic is. If the large current is on the wrong channel or has the wrong sign, fix the mapping before going on: this is the most common cause of a current loop that fights itself.
   5. Check that Ia + Ib + Ic ≈ 0.
   6. Watch the rotor snap to each angle.
-  7. Lower the overcurrent threshold temporarily and confirm it trips, then set it to 1.5 A. Repeat the 0° vector with all three duties shifted up together so the highest phase reaches the 93% cap; the measured current must not change, which proves the sample window holds at maximum duty. Measure inductance: with the rotor held at 0° by the 0.5 V vector, step the 0° vector to 1.0 V and record Ia in the capture buffer (no torque, because the rotor is already aligned), fit the time constant τ, and compute L = τ × R (expect τ ≈ 0.54 ms and L ≈ 0.87 mH wye). An LCR meter across two motor leads also works; it reads twice the wye value (expect about 1.7 mH). Record the measured R and L in motor\_params.h.
-- **Pass:** current matches V/R (about 0.3 A at 0.5 V with the 1.6 Ω wye resistance) within about 15% (dead time adds error at such low voltages). The three currents sum to about zero. The rotor holds firmly at each angle. The overcurrent trip works. Ia matches the multimeter within about 5%. Each angle puts the large current on the right channel with the right sign. Current doesn't change at maximum duty. Measured R and L are recorded.
+  7. Lower the overcurrent threshold temporarily and confirm it trips, then set it to 1.5 A. Repeat the 0° vector with all three duties shifted up together so the highest phase reaches the 93% cap; the measured current must not change, which proves the sample window holds at maximum duty. Measure inductance: with the rotor held at 0° by the 0.5 V vector, step the 0° vector to 1.0 V and record Ia in the capture buffer (no torque, because the rotor is already aligned), fit the time constant τ, and compute L = τ × R (expect τ ≈ 0.59 ms and L ≈ 1.3 mH wye if the 2.6 mH spec is line-to-line; τ ≈ 0.40 ms and 0.87 mH if per delta winding). An LCR meter across two motor leads also works; it reads twice the wye value (expect about 2.6 mH or 1.7 mH). Record the measured R and L in motor\_params.h.
+- **Pass:** current matches V/R (about 0.23 A at 0.5 V with the measured 2.2 Ω wye resistance) within about 15% (dead time adds error at such low voltages). The three currents sum to about zero. The rotor holds firmly at each angle. The overcurrent trip works. Ia matches the multimeter within about 5%. Each angle puts the large current on the right channel with the right sign. Current doesn't change at maximum duty. Measured R and L are recorded.
 
 ## Stages 9–15: from first spin to speed-controlled FOC
 
@@ -590,6 +592,7 @@ All modules live outside the CubeMX "USER CODE" sections, so regenerating the pr
 | `pwm.c/h` | TIM1 setup, motor\_can\_arm() (the only path that sets MOE), disarm, duty writes, break handling | 5 |
 | `cursense.c/h` | ADC injected sampling, offsets, conversion to amps | 7 |
 | `foc_math.c/h` | Clarke/Park transforms, CORDIC sine/cosine, space-vector PWM | 8 |
+| `ctrl.c/h` | Control step inside the 20 kHz interrupt: software overcurrent trip, then the output (duty command, fixed vector, later FOC) (added in Stage 8; not in the original module list) | 8 |
 | `pi.c/h` | PI controllers with anti-windup | 13 |
 | `motor_params.h` | Pole pairs, R, L, back-EMF constant, encoder offset, current limits | 8 |
 | `motor_sm.c/h` | Motor state machine, speed profile, protections | 14 |
@@ -598,7 +601,7 @@ All modules live outside the CubeMX "USER CODE" sections, so regenerating the pr
 **Stage prerequisites** (each blocks its stage until done)
 
 - [x] Stage 1: encoder MODE pin set for I2C/SSI, magnet checks done (Stage 1 setup checklist).
-- [ ] Stage 8: motor line-to-line resistance measured (expect about 3.2 Ω) to confirm the delta conversion.
+- [x] Stage 8: motor line-to-line resistance measured (expect about 3.2 Ω) to confirm the delta conversion. (4.4 Ω, 2026-10-08: the delta conversion doesn't hold; the 4.8 Ω spec reads as line-to-line. R = 2.2 Ω wye.)
 - [ ] Stage 8: current readings confirmed against a multimeter before the trip is raised above 1 A.
 - [ ] Stage 13: inductance measured and current-loop gains recomputed from the measured R and L.
 
@@ -882,3 +885,30 @@ Dated record of findings, decisions and measured results, newest last. Each entr
 - **Control interrupt: fail.** `isr=5.3us` disarmed (log), about 6.6 µs armed (PA3 width; the extra is the duty write). That's 13 % of the 50 µs period, against the plan's 10 %. Cause: the Debug build is `-O0` (`cmake/gcc-arm-none-eabi.cmake`), the same reason the Stage 1 encoder read took 16 µs. **Fix:** the top-level `CMakeLists.txt` (user-owned) now compiles `App/cursense.c`, `App/pwm.c` and `App/debug.c` at `-O2` via `set_source_files_properties`; the rest stays `-O0`. To re-measure.
 - **Noise (disarmed):** 18–23 counts peak-to-peak per phase over 20,000 samples (1 s). That statistic catches the rarest spike in a second (about ±3.5σ for Gaussian noise), so it overstates the typical noise. An RMS (standard deviation) per phase was added to the status line (`rms=`); the plan's "a few counts" is judged on that, with pp kept for spikes. The interrupt time and load moved to their own `CTRL isr_max= load= late=` line, with one decimal.
 - **Possible noise source (not changed):** ADC1 alternates between VM\_SENSE (regular) and SOB (injected) with a 2.5-cycle sample time. Charge left on the sampling capacitor shares into the 2.2 nF filter capacitor (about 5 pF / 2.2 nF of the voltage difference, a few counts). If SOB is noisier than SOA/SOC, raise the injected sample time in CubeMX (6.5 or 12.5 cycles). In the first run SOB was not noisier (pp 19 against 23/19), so not indicated so far.
+
+### 2026-10-08: Stage 7 passed (developer's report)
+
+- After the `-O2` change the developer reports everything in Stage 7 working. The re-measured `isr_max`/load and the RMS noise values weren't sent, so they aren't recorded. Earlier results stand: offsets 2023/2029/2042, sample about 1.8 µs after the low side turns on at the 93 % cap.
+
+### 2026-10-08: Stage 8 firmware written (not yet built or tested)
+
+- **Prerequisite:** motor line-to-line resistance **4.4 Ω** (developer, meter). The plan expected 3.2 Ω (4.8 Ω per delta winding). 4.4 Ω is 8 % under 4.8 Ω, so the spec most likely gives line-to-line values. `MOTOR_R_PHASE_OHM = 2.2` (wye) in `motor_params.h`. L stays TODO\_MEASURED at 1.3 mH (2.6 mH read as line-to-line). Motor table, current-loop gain note, stall current, the Gain 40 V/V check and the Stage 8 expected values were updated for 2.2 Ω. Worth confirming: meter leads shorted and their resistance subtracted, and all three pairs (AB, BC, CA) within a few percent of each other.
+- **CubeMX change required:** Computing → **CORDIC → Activated**, then regenerate. That enables its clock; `foc_init()` checks the clock and configures it at register level. Without it the boot log shows `FOC ... FAIL` and arming is refused.
+- **Files:** `App/motor_params.h` (new), `App/foc_math.c/h` (new: CORDIC sin/cos, SVPWM), `App/ctrl.c/h` (new; module table updated), `App/cursense.c` (the control interrupt calls `ctrl_isr()`), `App/debug.c/h` (`debug_capture_get()`), `App/fault.c/h` (FAULT\_OVERCURRENT), `App/app.c` (Stage 8 vector test mode, overcurrent logging, inductance fit), `App/app_config.h` (`BRINGUP_STAGE 8`), `CMakeLists.txt` (adds `ctrl.c`, `foc_math.c`, both at `-O2`).
+- **CORDIC (RM0440 17.3.6, Tables 106 and 118):** cosine function, RES1 = cos and RES2 = sin, modulus ARG2 = +1 from reset (NARGS = 0), 24 iterations in 6 cycles (max error 2⁻¹⁹), q1.31. Zero-overhead mode: write the angle (θ/π wrapped to [−1, 1)), read two results. Used only from the control interrupt.
+- **SVPWM (plan: Space-vector PWM):** |V| limited to 0.497 × 12 V, inverse Clarke, midpoint injection, duty = 0.5 + v/12, clamped to [0, 0.93]. Vbus is fixed at 12.0 V.
+- **Control interrupt, Stage 8 (`ctrl_isr`):**
+  1. **Overcurrent trip:** any |I| over the trip level → `motor_disarm()` in the interrupt (outputs off, then ENABLE low), capture triggered, event flagged. The main loop raises FAULT\_OVERCURRENT and logs the phase and current. Trip level `g_oc_trip`, clamped to 0.1–1.5 A, default 1.0 A (plan: 1 A until the meter check, then 1.5 A); NaN gives the default.
+  2. **Fixed vector:** V at θ, giving Vα = V cos θ and Vβ = V sin θ, then SVPWM, plus the common-mode shift `g_duty_shift` (0–0.43) on all three duties.
+- **Stage 8 test mode:** `g_vec_v` (phase-voltage amplitude, default 0.5 V, capped at 1.2 V: 0.55 A at 2.2 Ω, under the 1 A trip), `g_vec_deg`, `g_duty_shift`, `g_oc_trip`, `g_vstep_v` (1.0 V). Every arm starts at 0 V and ramps at 1 V/s. Commands: 1 arm, 2 disarm, 3 software break, 6 capture, 7 dump, **8 inductance step**.
+- **Inductance step (procedure step 7):** with the vector settled (0.5 V at 0°), command 8 sets the step value; the control interrupt applies it and triggers the capture in the same interrupt. The voltage reaches the motor at the next PWM update, half a sample before sample 512. When the capture is full, the main loop averages phase A over 100 samples before the step and the last 100 (20–25 ms after), finds the 63.2 % crossing by interpolation (τ), and logs `LFIT ... tau= L= (R from motor_params; V/I=)`. The fit assumes the vector is at 0°. The raw capture can still be dumped (command 7) to check the fit.
+- **Status lines every second:** `CUR mA=A/B/C sum= pp= rms= off= valid= n=`, `CTRL isr_max= load= late=`, and `VEC armed= V= deg= shift= dmax= expect mA=A/B/C trip= fault=` (expected currents from Ohm's law on the commanded phase voltages and R = 2.2 Ω).
+- **Before connecting the motor (bench rule 1):** the Stage 6 nFAULT short test must pass. It can be done in this build with the motor disconnected: arm with `g_vec_v = 0` (50 % on all phases), then short nFAULT. The falling-edge dead time can be measured in the same setup.
+- **Wiring order:** any order of the three motor leads on J13 works for Stage 8. Swapping two leads reverses the electrical rotation relative to the encoder, which Stage 10 measures (DIR and offset). Don't change the order after Stage 10; label the leads.
+
+### 2026-10-08: Stage 8 first run (motor connected, developer's log)
+
+- **At rest:** currents within ±7 mA of zero, RMS 4.1/2.7/2.0 counts. The first status line after boot (−200 mA, pp about 2,050) is an artefact: its window includes samples taken while the DRV was asleep with its amplifiers off.
+- **0°, 0.5 V:** Ia/Ib/Ic = **+220 / −105 / −97 mA** against +227 / −113 / −113 expected from 2.2 Ω (−3 %, −7 %, −14 %), sum +17 mA. Right channel and sign; within the 15 % criterion. Dead time accounts for the shortfall at such a low voltage. Meter reading, 120°/240°, trip test, max duty and the L step still to do.
+- **Bug fixed (`pwm.c`): "VEC arm refused: MOE did not set" while the outputs were actually on** (the next status line read `armed=1` and the vector ramped normally). MOE is written on the asynchronous path, and RM0440 says a read straight after setting it can still show 0 ("a delay must be inserted (dummy instruction) before reading it correctly"). At `-O0` the code was slow enough; at `-O2` the read came too soon. Now `motor_can_arm()` polls MOE up to 16 times, and if it really didn't set, forces the outputs off before returning "refused", so "refused but armed" can't happen.
+- **Interrupt time:** `isr_max=7.9us` (15.8 %) armed, 3.5 µs (7.1 %) disarmed, but that figure was the maximum since boot, which one rare event (for example the first, uncached run of the new vector code) can set. The `CTRL` line now reports mean and maximum per second plus the since-boot worst; the plan's 10 % is judged on the per-second maximum. To re-measure (log and PA3 width).

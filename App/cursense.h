@@ -41,6 +41,8 @@ typedef struct
   float    mean[PHASE_COUNT];    /* counts */
   float    rms[PHASE_COUNT];     /* standard deviation about the mean, counts */
   uint32_t samples;
+  uint32_t isr_mean_cycles;      /* control interrupt duration over the window */
+  uint32_t isr_max_cycles;
 } cursense_stats_t;
 
 /** Calibrate and enable ADC2 and ADC3 (ADC1 is done by power_init(), which

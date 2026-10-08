@@ -71,7 +71,9 @@ static volatile uint32_t s_sum[PHASE_COUNT];
 static volatile uint64_t s_sumsq[PHASE_COUNT];   /* of (count - 2048), keeps the variance precise */
 static volatile uint32_t s_n;
 
-static volatile uint32_t s_isr_max;
+static volatile uint32_t s_isr_max;        /* since boot */
+static volatile uint32_t s_isr_win_max;    /* since the last stats_take */
+static volatile uint32_t s_isr_win_sum;
 static volatile uint32_t s_late;
 
 /* Main loop only. */
@@ -90,6 +92,8 @@ static void cursense_stats_reset(void)
     s_sumsq[ph] = 0U;
   }
   s_n = 0U;
+  s_isr_win_max = 0U;
+  s_isr_win_sum = 0U;
 }
 
 /* Square root on the FPU (VSQRT.F32), without pulling in libm. */
@@ -249,6 +253,8 @@ void cursense_stats_take(cursense_stats_t *out)
   uint32_t primask = __get_PRIMASK();
   __disable_irq();
   out->samples = s_n;
+  out->isr_mean_cycles = (s_n > 0U) ? (s_isr_win_sum / s_n) : 0U;
+  out->isr_max_cycles = s_isr_win_max;
   for (uint32_t ph = 0U; ph < PHASE_COUNT; ph++)
   {
     out->min[ph] = s_min[ph];
@@ -354,6 +360,11 @@ void ADC1_2_IRQHandler(void)
 
   debug_timing_low();
   uint32_t dt = DWT->CYCCNT - t0;
+  s_isr_win_sum += dt;
+  if (dt > s_isr_win_max)
+  {
+    s_isr_win_max = dt;
+  }
   if (dt > s_isr_max)
   {
     s_isr_max = dt;
