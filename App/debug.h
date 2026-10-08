@@ -29,6 +29,16 @@ bool debug_init(void);
  *  Main loop only. Integers only: newlib-nano printf has no float support. */
 void debug_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/** Capture buffer (Stage 7 onward). push: control interrupt, every sample.
+ *  trigger: keeps 512 samples before it, records 512 after, then freezes.
+ *  dump_start / dump_tick: main loop, one SWO line per call; the capture
+ *  re-arms after the last line. */
+void debug_capture_push(uint16_t a, uint16_t b, uint16_t c);
+void debug_capture_trigger(void);
+bool debug_capture_done(void);
+bool debug_capture_dump_start(void);
+bool debug_capture_dump_tick(void);
+
 /** Log the reset cause from RCC_CSR, then clear the flags (plan Stage 2). */
 void debug_log_reset_cause(void);
 

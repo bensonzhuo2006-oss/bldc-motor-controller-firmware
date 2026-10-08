@@ -12,6 +12,9 @@
 #include "power.h"
 #include "drv8323.h"
 #endif
+#if BRINGUP_STAGE >= 7
+#include "cursense.h"
+#endif
 
 /* ---- Constants ------------------------------------------------------------ */
 
@@ -59,6 +62,9 @@ static const pwm_phase_io_t s_phase_io[PHASE_COUNT] =
 
 static volatile bool s_break_event;
 static volatile uint32_t s_break_events;
+
+/* Duty command from the main loop, applied by the control interrupt. */
+static volatile float s_cmd[PHASE_COUNT] = { PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD };
 
 /* ---- Helpers -------------------------------------------------------------- */
 
@@ -177,6 +183,11 @@ bool motor_can_arm(const char **reason)
   if (!power_vm_ok())                                           { *reason = "no VM_OK"; return false; }
   if (!drv8323_is_configured())                                 { *reason = "DRV not configured"; return false; }
 #endif
+#if BRINGUP_STAGE >= 7
+  /* Plan Stage 7 arming rules: ADC offsets valid, control heartbeat alive. */
+  if (!cursense_offsets_valid())                                { *reason = "current offsets not valid"; return false; }
+  if (!cursense_heartbeat_ok(HAL_GetTick()))                    { *reason = "control interrupt not running"; return false; }
+#endif
 
   uint32_t primask = __get_PRIMASK();
   __disable_irq();
@@ -250,6 +261,24 @@ void pwm_zero_command(void)
   }
   pwm_set_duty(PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD);
   TIM1->EGR = TIM_EGR_UG;           /* load the preloaded CCRs now */
+}
+
+void pwm_command_duty(float a, float b, float c)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  s_cmd[PHASE_A] = a;
+  s_cmd[PHASE_B] = b;
+  s_cmd[PHASE_C] = c;
+  __set_PRIMASK(primask);
+}
+
+void pwm_isr_update(void)
+{
+  if (pwm_is_armed())
+  {
+    pwm_set_duty(s_cmd[PHASE_A], s_cmd[PHASE_B], s_cmd[PHASE_C]);
+  }
 }
 
 void pwm_get_duty_permille(uint32_t *a, uint32_t *b, uint32_t *c)

@@ -51,6 +51,95 @@ void debug_log(const char *fmt, ...)
   (void)ITM_SendChar('\n');
 }
 
+/* ---- Capture buffer ------------------------------------------------------- */
+
+/* Every control-interrupt sample (three ADC counts) in a ring; a trigger
+ * keeps the half before it and fills the half after it, then freezes
+ * (plan Stage 7: RAM capture buffer around a trigger). 1024 x 3 x 2 bytes
+ * = 6 KB, 51.2 ms at 20 kHz. Power of two, so the index wraps with a mask. */
+#define DEBUG_CAP_SAMPLES   1024U
+#define DEBUG_CAP_MASK      (DEBUG_CAP_SAMPLES - 1U)
+#define DEBUG_CAP_POST      (DEBUG_CAP_SAMPLES / 2U)
+
+typedef enum
+{
+  CAP_RUN = 0,
+  CAP_TRIGGERED,
+  CAP_DONE
+} cap_state_t;
+
+static volatile uint16_t s_cap[DEBUG_CAP_SAMPLES][3];
+static volatile uint32_t s_cap_idx;
+static volatile uint32_t s_cap_post;
+static volatile cap_state_t s_cap_state;
+static uint32_t s_cap_dump_left;   /* main loop only */
+static uint32_t s_cap_dump_i;
+
+void debug_capture_push(uint16_t a, uint16_t b, uint16_t c)
+{
+  if (s_cap_state == CAP_DONE)
+  {
+    return;
+  }
+  uint32_t i = s_cap_idx;
+  s_cap[i][0] = a;
+  s_cap[i][1] = b;
+  s_cap[i][2] = c;
+  s_cap_idx = (i + 1U) & DEBUG_CAP_MASK;
+  if ((s_cap_state == CAP_TRIGGERED) && (--s_cap_post == 0U))
+  {
+    s_cap_state = CAP_DONE;
+  }
+}
+
+void debug_capture_trigger(void)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (s_cap_state == CAP_RUN)
+  {
+    s_cap_post = DEBUG_CAP_POST;
+    s_cap_state = CAP_TRIGGERED;
+  }
+  __set_PRIMASK(primask);
+}
+
+bool debug_capture_done(void)
+{
+  return s_cap_state == CAP_DONE;
+}
+
+bool debug_capture_dump_start(void)
+{
+  if ((s_cap_state != CAP_DONE) || (s_cap_dump_left != 0U))
+  {
+    return false;
+  }
+  s_cap_dump_i = s_cap_idx;   /* oldest sample */
+  s_cap_dump_left = DEBUG_CAP_SAMPLES;
+  debug_log("CAP begin n=%u trigger_at=%u (t = n x 50 us; counts A B C)",
+            DEBUG_CAP_SAMPLES, DEBUG_CAP_SAMPLES - DEBUG_CAP_POST);
+  return true;
+}
+
+bool debug_capture_dump_tick(void)
+{
+  if (s_cap_dump_left == 0U)
+  {
+    return false;
+  }
+  uint32_t n = DEBUG_CAP_SAMPLES - s_cap_dump_left;
+  uint32_t i = s_cap_dump_i;
+  debug_log("CAP %lu %u %u %u", n, (unsigned)s_cap[i][0], (unsigned)s_cap[i][1], (unsigned)s_cap[i][2]);
+  s_cap_dump_i = (i + 1U) & DEBUG_CAP_MASK;
+  if (--s_cap_dump_left == 0U)
+  {
+    debug_log("CAP end; capture re-armed");
+    s_cap_state = CAP_RUN;
+  }
+  return true;
+}
+
 /* ---- Reset cause ---------------------------------------------------------- */
 
 /* RCC_CSR reset flags (RM0440 RCC_CSR). Every reset also pulses NRST, so

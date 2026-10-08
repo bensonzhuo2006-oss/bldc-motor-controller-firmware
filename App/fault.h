@@ -27,6 +27,8 @@ typedef enum
   FAULT_DRV_SPI,             /* SPI3 transfer timed out */
   FAULT_DRV_WAKE,            /* nFAULT still low after the wake time */
   FAULT_PWM_BREAK,           /* TIM1 break (nFAULT on BKIN, or software break) */
+  FAULT_CTRL_HEARTBEAT,      /* control interrupt count stopped (Stage 7) */
+  FAULT_CUR_OFFSET,          /* current-sense offset out of range (Stage 7) */
   FAULT_COUNT
 } fault_code_t;
 

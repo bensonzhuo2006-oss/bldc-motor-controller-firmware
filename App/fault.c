@@ -72,6 +72,8 @@ const char *fault_name(fault_code_t code)
     case FAULT_DRV_SPI:             return "DRV_SPI";
     case FAULT_DRV_WAKE:            return "DRV_WAKE";
     case FAULT_PWM_BREAK:           return "PWM_BREAK";
+    case FAULT_CTRL_HEARTBEAT:      return "CTRL_HEARTBEAT";
+    case FAULT_CUR_OFFSET:          return "CUR_OFFSET";
     default:                        return "?";
   }
 }

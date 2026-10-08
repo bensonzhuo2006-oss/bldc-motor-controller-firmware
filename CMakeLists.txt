@@ -52,6 +52,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/drv8323.c
     App/fault.c
     App/pwm.c
+    App/cursense.c
 )
 
 # Add include paths

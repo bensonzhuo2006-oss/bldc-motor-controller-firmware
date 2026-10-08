@@ -21,12 +21,19 @@
 #if BRINGUP_STAGE >= 5
 #include "pwm.h"
 #endif
+#if BRINGUP_STAGE >= 7
+#include "cursense.h"
+#endif
 #include <stdbool.h>
 #include <stdint.h>
 
 #ifndef BRINGUP_STAGE
 #error "BRINGUP_STAGE must be defined in app_config.h"
 #endif
+
+/* Stages 5-7 drive the PWM from debugger-set test duties; from Stage 8 the
+ * control interrupt takes over. */
+#define APP_TEST_MODE   ((BRINGUP_STAGE >= 5) && (BRINGUP_STAGE <= 7))
 
 /* Main-loop tick: 1 kHz (plan: Timing, interrupts and data sharing). */
 #define APP_TICK_S             0.001f
@@ -115,10 +122,16 @@
 #define APP_CMD_SW_BREAK   3U   /* TIM1 software break */
 #define APP_CMD_SWEEP      4U   /* Stage 6: duty sweep on all phases */
 #define APP_CMD_IDRIVE     5U   /* Stage 6: apply g_drv_idrive (sleep, re-wake, reconfigure) */
+#define APP_CMD_CAPTURE    6U   /* Stage 7: trigger the capture buffer */
+#define APP_CMD_DUMP       7U   /* Stage 7: dump the capture over SWO */
 volatile uint32_t g_app_cmd;
 #endif
 
-#if (BRINGUP_STAGE == 5) || (BRINGUP_STAGE == 6)
+/* Stage 6 bench tools (sweep, IDRIVE, phase hold-off) stay available in the
+ * later test-mode stages. */
+#define APP_BRIDGE_TOOLS   ((BRINGUP_STAGE >= 6) && APP_TEST_MODE)
+
+#if APP_TEST_MODE
 /* PWM test mode. Target duty per phase, 0..1, set from the debugger
  * (`set var g_duty_a = 0.5`). The applied duties slew toward the targets,
  * so every arm starts from the zero command and every change ramps
@@ -130,19 +143,33 @@ volatile uint32_t g_app_cmd;
 #define TEST_DUTY_A_INIT     0.20f
 #define TEST_DUTY_B_INIT     0.50f
 #define TEST_DUTY_C_INIT     0.80f
-#else
+#elif BRINGUP_STAGE == 6
 /* Plan Stage 6 step 1: one phase switching at 50 %; the others at 0 %
  * (low side held on, not switching). */
 #define TEST_DUTY_A_INIT     0.50f
 #define TEST_DUTY_B_INIT     0.00f
 #define TEST_DUTY_C_INIT     0.00f
+#else
+/* Plan Stage 7: PWM at 50 % on all phases (zero current, no motor). */
+#define TEST_DUTY_A_INIT     0.50f
+#define TEST_DUTY_B_INIT     0.50f
+#define TEST_DUTY_C_INIT     0.50f
 #endif
 volatile float g_duty_a = TEST_DUTY_A_INIT;
 volatile float g_duty_b = TEST_DUTY_B_INIT;
 volatile float g_duty_c = TEST_DUTY_C_INIT;
 #endif
 
-#if BRINGUP_STAGE == 6
+#if BRINGUP_STAGE >= 7
+/* Current-sense status line period (plan Stage 7: zero-current noise). */
+#define CUR_LOG_PERIOD_MS    1000UL
+/* Control interrupt budget: one PWM period, 8,500 cycles at 170 MHz (plan:
+ * TIM1 and control timing). */
+#define CTRL_PERIOD_CYCLES   8500UL
+#define AMPS_TO_MA           1000.0f
+#endif
+
+#if APP_BRIDGE_TOOLS
 /* Plan Stage 6 step 4: duty sweep, all phases together, each step held
  * long enough to read the switch-node average on a meter. The plan says
  * 5-95 %; the top step is the PWM_DUTY_MAX cap (93 %). */
@@ -163,10 +190,10 @@ volatile uint32_t g_phase_off;
 static uint32_t s_last_tick_ms;
 static uint32_t s_task_max_cycles;
 
-#if (BRINGUP_STAGE == 5) || (BRINGUP_STAGE == 6)
+#if APP_TEST_MODE
 static float s_duty[PHASE_COUNT];   /* applied duties */
 #endif
-#if BRINGUP_STAGE == 6
+#if APP_BRIDGE_TOOLS
 static uint32_t s_sweep_step;
 static uint32_t s_sweep_ms;
 static bool s_sweeping;
@@ -298,11 +325,15 @@ static void enc_log_status_change(const mt6701_snapshot_t *s)
  * until the control interrupt takes over PA3 in Stage 7. */
 static void enc_tick(mt6701_snapshot_t *s)
 {
+#if BRINGUP_STAGE < 7
   debug_timing_high();
+#endif
   uint32_t start = debug_cycles();
   (void)mt6701_update();
   uint32_t elapsed = debug_cycles() - start;
+#if BRINGUP_STAGE < 7
   debug_timing_low();
+#endif
   if (elapsed > s_enc_read_max_cycles)
   {
     s_enc_read_max_cycles = elapsed;
@@ -596,6 +627,11 @@ static void drv_configure_after_wake(bool nfault_released, uint32_t blanked_befo
     debug_log("DRV wake #%lu nfault=high wake_pulses_ignored=%lu cfg OK (cal done, locked, lock test reg05=0x%03X)",
               s_drv_wakes, pulses, (unsigned)r.read);
     drv_log_registers("DRV cfg");
+#if BRINGUP_STAGE >= 7
+    /* Amplifiers just calibrated, nothing armed: measure the zero-current
+     * offsets (plan Stage 7). Arming is refused until they're valid. */
+    cursense_offset_start();
+#endif
   }
   else
   {
@@ -670,6 +706,9 @@ static void drv_monitor(uint32_t now_ms)
     uint32_t t;
     fault_first_context(&c1, &c2, &t);
     debug_log("FAULT latched %s ctx1=0x%lX ctx2=0x%lX t=%lums", fault_name(fault_first()), c1, c2, t);
+#if BRINGUP_STAGE >= 7
+    debug_capture_trigger();   /* keep the 25 ms before the fault and the 25 ms after */
+#endif
     if (drv8323_is_awake())
     {
       uint16_t f1 = 0U;
@@ -782,9 +821,75 @@ static void stage3_tick(uint32_t now_ms)
 }
 #endif
 
-/* ---- PWM test mode (Stages 5 and 6) --------------------------------------- */
+/* ---- Control interrupt monitor (Stage 7 onward) --------------------------- */
 
-#if (BRINGUP_STAGE == 5) || (BRINGUP_STAGE == 6)
+#if BRINGUP_STAGE >= 7
+static void ctrl_tick(uint32_t now_ms)
+{
+  float means[PHASE_COUNT];
+  bool ok;
+
+  /* Heartbeat against real time (HAL_GetTick), so the main loop's catch-up
+   * ticks can't trip it; stops with the core under the debugger. A stale
+   * count latches a fault, and the fault response disarms (plan: Control-
+   * loop heartbeat). */
+  if (!cursense_heartbeat_ok(HAL_GetTick()))
+  {
+    (void)fault_raise(FAULT_CTRL_HEARTBEAT, cursense_late_count(), 0U);
+  }
+
+  if (cursense_offset_poll(means, &ok))
+  {
+    debug_log("CUR offsets A=%u B=%u C=%u counts (expect 2048 +/-250) %s",
+              (unsigned)(means[PHASE_A] + 0.5f), (unsigned)(means[PHASE_B] + 0.5f),
+              (unsigned)(means[PHASE_C] + 0.5f), ok ? "OK" : "FAIL");
+    if (!ok)
+    {
+      (void)fault_raise(FAULT_CUR_OFFSET,
+                        ((uint32_t)means[PHASE_A] << 16) | (uint32_t)means[PHASE_B], (uint32_t)means[PHASE_C]);
+    }
+  }
+
+  (void)debug_capture_dump_tick();
+
+#if BRINGUP_STAGE == 7
+  /* Zero-current level and noise per phase over the last second (plan
+   * Stage 7 step 3), control interrupt time and load (step 2). */
+  if ((now_ms % CUR_LOG_PERIOD_MS) == 0U)
+  {
+    cursense_stats_t st;
+    float off[PHASE_COUNT];
+    int32_t ma[PHASE_COUNT];
+    cursense_stats_take(&st);
+    cursense_offsets(off);
+    if (st.samples == 0U)
+    {
+      debug_log("CUR no samples (control interrupt not running)");
+      return;
+    }
+    for (uint32_t ph = 0U; ph < PHASE_COUNT; ph++)
+    {
+      ma[ph] = (int32_t)((st.mean[ph] - off[ph]) * CURSENSE_AMPS_PER_COUNT * AMPS_TO_MA);
+    }
+    uint32_t isr = cursense_isr_max_cycles();
+    debug_log("CUR mA=%ld/%ld/%ld pp=%u/%u/%u off=%u/%u/%u valid=%u n=%lu isr=%lu.%luus load=%lu%% late=%lu",
+              (long)ma[PHASE_A], (long)ma[PHASE_B], (long)ma[PHASE_C],
+              (unsigned)(st.max[PHASE_A] - st.min[PHASE_A]), (unsigned)(st.max[PHASE_B] - st.min[PHASE_B]),
+              (unsigned)(st.max[PHASE_C] - st.min[PHASE_C]),
+              (unsigned)(off[PHASE_A] + 0.5f), (unsigned)(off[PHASE_B] + 0.5f), (unsigned)(off[PHASE_C] + 0.5f),
+              cursense_offsets_valid() ? 1U : 0U, st.samples,
+              isr / DEBUG_CYCLES_PER_US, (isr % DEBUG_CYCLES_PER_US) * 10UL / DEBUG_CYCLES_PER_US,
+              (isr * 100UL) / CTRL_PERIOD_CYCLES, cursense_late_count());
+  }
+#else
+  (void)now_ms;
+#endif
+}
+#endif
+
+/* ---- PWM test mode (Stages 5 to 7) ---------------------------------------- */
+
+#if APP_TEST_MODE
 static float test_target(float t)
 {
   if (!(t >= 0.0f))   /* also catches NaN from a mistyped debugger value */
@@ -811,7 +916,7 @@ static float test_slew(float now, float target)
 static void test_arm(void)
 {
   const char *reason;
-#if BRINGUP_STAGE == 6
+#if APP_BRIDGE_TOOLS
   uint32_t off = g_phase_off & 0x7UL;
   for (uint32_t ph = 0U; ph < PHASE_COUNT; ph++)
   {
@@ -822,6 +927,10 @@ static void test_arm(void)
     debug_log("PWM phases held off (INH = INL = low): A=%u B=%u C=%u",
               (unsigned)(off & 1UL), (unsigned)((off >> 1) & 1UL), (unsigned)((off >> 2) & 1UL));
   }
+#endif
+#if BRINGUP_STAGE >= 7
+  /* The control interrupt applies the command once armed: zero it first. */
+  pwm_command_duty(PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD);
 #endif
   pwm_zero_command();
   s_duty[PHASE_A] = PWM_DUTY_ZERO_CMD;
@@ -839,7 +948,7 @@ static void test_arm(void)
   }
 }
 
-#if BRINGUP_STAGE == 6
+#if APP_BRIDGE_TOOLS
 static void sweep_apply_step(void)
 {
   float d = s_sweep_duty[s_sweep_step];
@@ -906,7 +1015,7 @@ static void test_command(uint32_t cmd)
       debug_log("PWM software break: moe=%u pins=0x%02lX (expect moe=0 pins=0x00)",
                 pwm_is_armed() ? 1U : 0U, board_pwm_pins_read());
       break;
-#if BRINGUP_STAGE == 6
+#if APP_BRIDGE_TOOLS
     case APP_CMD_SWEEP:
       if (!pwm_is_armed())
       {
@@ -919,6 +1028,18 @@ static void test_command(uint32_t cmd)
       break;
     case APP_CMD_IDRIVE:
       test_apply_idrive();
+      break;
+#endif
+#if BRINGUP_STAGE >= 7
+    case APP_CMD_CAPTURE:
+      debug_capture_trigger();
+      debug_log("CAP triggered; g_app_cmd = 7 dumps it once full (25 ms)");
+      break;
+    case APP_CMD_DUMP:
+      if (!debug_capture_dump_start())
+      {
+        debug_log("CAP dump refused: no finished capture (g_app_cmd = 6 first)");
+      }
       break;
 #endif
     default:
@@ -938,15 +1059,19 @@ static void test_tick(uint32_t now_ms)
 
   if (pwm_is_armed())
   {
-#if BRINGUP_STAGE == 6
+#if APP_BRIDGE_TOOLS
     sweep_tick();
 #endif
     s_duty[PHASE_A] = test_slew(s_duty[PHASE_A], test_target(g_duty_a));
     s_duty[PHASE_B] = test_slew(s_duty[PHASE_B], test_target(g_duty_b));
     s_duty[PHASE_C] = test_slew(s_duty[PHASE_C], test_target(g_duty_c));
+#if BRINGUP_STAGE >= 7
+    pwm_command_duty(s_duty[PHASE_A], s_duty[PHASE_B], s_duty[PHASE_C]);
+#else
     pwm_set_duty(s_duty[PHASE_A], s_duty[PHASE_B], s_duty[PHASE_C]);
+#endif
   }
-#if BRINGUP_STAGE == 6
+#if APP_BRIDGE_TOOLS
   else
   {
     s_sweeping = false;   /* a break or fault ends the sweep */
@@ -1023,13 +1148,22 @@ void app_init(void)
             pwm_ok ? "OK" : "FAIL", what, pwm_is_armed() ? 1U : 0U);
   debug_log("PWM sysbrk lockup+sram_parity+flash_ecc cfgr2=0x%03lX", SYSCFG->CFGR2);
 #endif
+#if BRINGUP_STAGE >= 7
+  /* After power_init() (ADC1 enabled) and pwm_init() (TRGO2 running). */
+  const char *cur_what;
+  bool cur_ok = cursense_init(&cur_what);
+  debug_log("CUR adc1/2/3 injected on TRGO2, control irq on ADC1 JEOS %s (%s)", cur_ok ? "OK" : "FAIL", cur_what);
+#endif
 #if BRINGUP_STAGE == 5
   debug_log("STAGE5 DRV held asleep. Commands: set g_app_cmd = 1 arm, 2 disarm, 3 software break");
-#elif BRINGUP_STAGE == 6
-  debug_log("STAGE6 g_app_cmd: 1 arm, 2 disarm, 3 sw break, 4 sweep, 5 apply g_drv_idrive");
-  debug_log("STAGE6 targets g_duty_a/b/c (0..0.93), now A=%u B=%u C=%u permille",
+#elif APP_BRIDGE_TOOLS
+  debug_log("STAGE%d g_app_cmd: 1 arm, 2 disarm, 3 sw break, 4 sweep, 5 apply g_drv_idrive", BRINGUP_STAGE);
+#if BRINGUP_STAGE >= 7
+  debug_log("STAGE%d g_app_cmd: 6 capture trigger, 7 capture dump", BRINGUP_STAGE);
+#endif
+  debug_log("STAGE%d targets g_duty_a/b/c (0..0.93), now A=%u B=%u C=%u permille", BRINGUP_STAGE,
             (unsigned)(g_duty_a * 1000.0f), (unsigned)(g_duty_b * 1000.0f), (unsigned)(g_duty_c * 1000.0f));
-  debug_log("STAGE6 g_phase_off: 1 = A, 2 = B, 4 = C held off (both FETs) from the next arm");
+  debug_log("STAGE%d g_phase_off: 1 = A, 2 = B, 4 = C held off (both FETs) from the next arm", BRINGUP_STAGE);
 #endif
 
   s_last_tick_ms = HAL_GetTick();
@@ -1055,6 +1189,9 @@ void app_loop(void)
 #if BRINGUP_STAGE >= 3
     drv_tick();
 #endif
+#if BRINGUP_STAGE >= 7
+    ctrl_tick(s_last_tick_ms);   /* before drv_monitor: a fault here gets the same-tick response */
+#endif
 #if BRINGUP_STAGE >= 4
     drv_monitor(s_last_tick_ms);
 #endif
@@ -1069,7 +1206,7 @@ void app_loop(void)
     stage3_tick(s_last_tick_ms);
 #elif BRINGUP_STAGE == 4
     stage4_tick(s_last_tick_ms);
-#elif (BRINGUP_STAGE == 5) || (BRINGUP_STAGE == 6)
+#elif APP_TEST_MODE
     test_tick(s_last_tick_ms);
 #endif
     uint32_t elapsed = debug_cycles() - start;

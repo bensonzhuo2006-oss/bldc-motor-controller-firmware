@@ -53,6 +53,12 @@ bool pwm_phase_output(board_phase_t ph, bool on);
  *  motor_can_arm() sees a zero command. Does nothing while armed. */
 void pwm_zero_command(void);
 
+/** Stage 7 onward: the main loop sets the duty command (0..1 per phase),
+ *  the control interrupt writes it to TIM1 with pwm_isr_update() while
+ *  armed (plan: the main loop doesn't write CCR registers). */
+void pwm_command_duty(float a, float b, float c);
+void pwm_isr_update(void);
+
 /** Duties as written, in permille, for logging. */
 void pwm_get_duty_permille(uint32_t *a, uint32_t *b, uint32_t *c);
 
