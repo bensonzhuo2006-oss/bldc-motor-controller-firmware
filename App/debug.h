@@ -32,6 +32,10 @@ void debug_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /** Log the reset cause from RCC_CSR, then clear the flags (plan Stage 2). */
 void debug_log_reset_cause(void);
 
+/** NMI response, called from NMI_Handler: outputs off, then ENABLE low,
+ *  then FLASH_ECCR and SYSCFG_CFGR2 over SWO; halts (debugger) or blinks. */
+void debug_nmi_report(void) __attribute__((noreturn));
+
 /** Raw SWO output without printf, usable from fault handlers. */
 void debug_put_str(const char *s);
 void debug_put_hex32(uint32_t v);

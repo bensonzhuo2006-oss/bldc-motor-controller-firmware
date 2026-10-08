@@ -106,31 +106,70 @@
 #endif
 
 #if BRINGUP_STAGE >= 5
-/* Debugger commands: pause, set g_app_cmd, continue (Stage 5 onward).
- * Arming is always an explicit action (plan: Rules for the bench, 4). */
+/* Debugger commands: pause, `set var g_app_cmd = N` in the Debug Console,
+ * continue (Stage 5 onward). Arming is always an explicit action (plan:
+ * Rules for the bench, 4). */
 #define APP_CMD_NONE       0U
-#define APP_CMD_ARM        1U   /* arm from zero command, then ramp to the test duties */
+#define APP_CMD_ARM        1U   /* arm from the zero command, then slew to the test duties */
 #define APP_CMD_DISARM     2U
 #define APP_CMD_SW_BREAK   3U   /* TIM1 software break */
+#define APP_CMD_SWEEP      4U   /* Stage 6: duty sweep on all phases */
+#define APP_CMD_IDRIVE     5U   /* Stage 6: apply g_drv_idrive (sleep, re-wake, reconfigure) */
 volatile uint32_t g_app_cmd;
 #endif
 
+#if (BRINGUP_STAGE == 5) || (BRINGUP_STAGE == 6)
+/* PWM test mode. Target duty per phase, 0..1, set from the debugger
+ * (`set var g_duty_a = 0.5`). The applied duties slew toward the targets,
+ * so every arm starts from the zero command and every change ramps
+ * (plan: Hard rules). Targets are clamped to [0, PWM_DUTY_MAX]. */
+#define TEST_SLEW_PER_MS     0.001f   /* full scale in 1 s */
+#define TEST_LOG_PERIOD_MS   1000UL
 #if BRINGUP_STAGE == 5
-/* Stage 5 test duties: a different duty per phase to identify each on the
- * scope (plan Stage 5 step 1). Ramp from the zero command (50 %) over 500 ms. */
-#define STAGE5_DUTY_A        0.20f
-#define STAGE5_DUTY_B        0.50f
-#define STAGE5_DUTY_C        0.80f
-#define STAGE5_RAMP_MS       500U
-#define STAGE5_LOG_PERIOD_MS 1000UL
+/* Plan Stage 5 step 1: a different duty per phase to identify each. */
+#define TEST_DUTY_A_INIT     0.20f
+#define TEST_DUTY_B_INIT     0.50f
+#define TEST_DUTY_C_INIT     0.80f
+#else
+/* Plan Stage 6 step 1: one phase switching at 50 %; the others at 0 %
+ * (low side held on, not switching). */
+#define TEST_DUTY_A_INIT     0.50f
+#define TEST_DUTY_B_INIT     0.00f
+#define TEST_DUTY_C_INIT     0.00f
+#endif
+volatile float g_duty_a = TEST_DUTY_A_INIT;
+volatile float g_duty_b = TEST_DUTY_B_INIT;
+volatile float g_duty_c = TEST_DUTY_C_INIT;
+#endif
+
+#if BRINGUP_STAGE == 6
+/* Plan Stage 6 step 4: duty sweep, all phases together, each step held
+ * long enough to read the switch-node average on a meter. The plan says
+ * 5-95 %; the top step is the PWM_DUTY_MAX cap (93 %). */
+#define SWEEP_STEP_MS        4000UL
+static const float s_sweep_duty[] = { 0.05f, 0.10f, 0.25f, 0.50f, 0.75f, 0.90f, PWM_DUTY_MAX };
+#define SWEEP_STEPS          (sizeof(s_sweep_duty) / sizeof(s_sweep_duty[0]))
+
+/* Plan Stage 6 step 2: IDRIVE code to try, IDRIVEP << 4 | IDRIVEN
+ * (datasheet Tables 8-16, 8-17), same on both sides. Applied by command 5. */
+volatile uint32_t g_drv_idrive = DRV_CFG_IDRIVE;
+
+/* Phases held off at the next arm, bit 0 = A, 1 = B, 2 = C: their INH and
+ * INL are driven low, so both FETs stay off and the phase floats. Isolates
+ * one half-bridge (2026-10-08, VDS_HA on phase A). */
+volatile uint32_t g_phase_off;
 #endif
 
 static uint32_t s_last_tick_ms;
 static uint32_t s_task_max_cycles;
 
-#if BRINGUP_STAGE == 5
-static uint32_t s_ramp_ms;
-static bool s_ramping;
+#if (BRINGUP_STAGE == 5) || (BRINGUP_STAGE == 6)
+static float s_duty[PHASE_COUNT];   /* applied duties */
+#endif
+#if BRINGUP_STAGE == 6
+static uint32_t s_sweep_step;
+static uint32_t s_sweep_ms;
+static bool s_sweeping;
 #endif
 
 #if BRINGUP_STAGE >= 4
@@ -658,6 +697,11 @@ static void drv_monitor(uint32_t now_ms)
 static void drv_tick(void)
 {
   bool vm_ok = power_vm_ok();
+
+  if (drv8323_sync())
+  {
+    debug_log("DRV sleep (ENABLE low after disarm); re-wakes if VM_OK and no fault");
+  }
 #if BRINGUP_STAGE == 5
   /* Stage 5: PWM into a sleeping DRV, so ENABLE is held low throughout. */
   bool may_wake = false;
@@ -738,76 +782,188 @@ static void stage3_tick(uint32_t now_ms)
 }
 #endif
 
-/* ---- Stage 5 test mode ---------------------------------------------------- */
+/* ---- PWM test mode (Stages 5 and 6) --------------------------------------- */
 
-#if BRINGUP_STAGE == 5
-static void stage5_tick(uint32_t now_ms)
+#if (BRINGUP_STAGE == 5) || (BRINGUP_STAGE == 6)
+static float test_target(float t)
+{
+  if (!(t >= 0.0f))   /* also catches NaN from a mistyped debugger value */
+  {
+    return 0.0f;
+  }
+  return (t > PWM_DUTY_MAX) ? PWM_DUTY_MAX : t;
+}
+
+static float test_slew(float now, float target)
+{
+  float step = target - now;
+  if (step > TEST_SLEW_PER_MS)
+  {
+    step = TEST_SLEW_PER_MS;
+  }
+  else if (step < -TEST_SLEW_PER_MS)
+  {
+    step = -TEST_SLEW_PER_MS;
+  }
+  return now + step;
+}
+
+static void test_arm(void)
+{
+  const char *reason;
+#if BRINGUP_STAGE == 6
+  uint32_t off = g_phase_off & 0x7UL;
+  for (uint32_t ph = 0U; ph < PHASE_COUNT; ph++)
+  {
+    (void)pwm_phase_output((board_phase_t)ph, (off & (1UL << ph)) == 0U);
+  }
+  if (off != 0U)
+  {
+    debug_log("PWM phases held off (INH = INL = low): A=%u B=%u C=%u",
+              (unsigned)(off & 1UL), (unsigned)((off >> 1) & 1UL), (unsigned)((off >> 2) & 1UL));
+  }
+#endif
+  pwm_zero_command();
+  s_duty[PHASE_A] = PWM_DUTY_ZERO_CMD;
+  s_duty[PHASE_B] = PWM_DUTY_ZERO_CMD;
+  s_duty[PHASE_C] = PWM_DUTY_ZERO_CMD;
+  if (motor_can_arm(&reason))
+  {
+    debug_log("PWM armed from zero command; slewing to A=%u B=%u C=%u permille",
+              (unsigned)(test_target(g_duty_a) * 1000.0f), (unsigned)(test_target(g_duty_b) * 1000.0f),
+              (unsigned)(test_target(g_duty_c) * 1000.0f));
+  }
+  else
+  {
+    debug_log("PWM arm refused: %s", reason);
+  }
+}
+
+#if BRINGUP_STAGE == 6
+static void sweep_apply_step(void)
+{
+  float d = s_sweep_duty[s_sweep_step];
+  g_duty_a = d;
+  g_duty_b = d;
+  g_duty_c = d;
+  s_sweep_ms = 0U;
+  debug_log("SWEEP %lu/%u duty=%u permille: expect MOTA/B/C avg = %lu mV (duty x VM)",
+            s_sweep_step + 1UL, (unsigned)SWEEP_STEPS, (unsigned)(d * 1000.0f),
+            (uint32_t)(d * (float)power_vm_mv()));
+}
+
+static void sweep_tick(void)
+{
+  if (!s_sweeping || (++s_sweep_ms < SWEEP_STEP_MS))
+  {
+    return;
+  }
+  if (++s_sweep_step < SWEEP_STEPS)
+  {
+    sweep_apply_step();
+    return;
+  }
+  s_sweeping = false;
+  g_duty_a = PWM_DUTY_ZERO_CMD;
+  g_duty_b = PWM_DUTY_ZERO_CMD;
+  g_duty_c = PWM_DUTY_ZERO_CMD;
+  debug_log("SWEEP done; back to 50 %% on all phases");
+}
+
+/* Disarm and sleep, set the new IDRIVE, then drv_tick() wakes the DRV and
+ * configure() writes, verifies and locks it. Re-arm by command to test. */
+static void test_apply_idrive(void)
+{
+  uint32_t code = g_drv_idrive;
+  uint32_t src_ma;
+  uint32_t snk_ma;
+  if (code > 0xFFUL)
+  {
+    debug_log("IDRIVE 0x%lX invalid (0x00-0xFF: IDRIVEP << 4 | IDRIVEN)", code);
+    return;
+  }
+  s_sweeping = false;
+  drv8323_sleep();                       /* disarms first */
+  (void)drv8323_set_idrive((uint8_t)code);
+  drv8323_idrive_ma((uint8_t)code, &src_ma, &snk_ma);
+  debug_log("IDRIVE 0x%02lX source=%lumA sink=%lumA; DRV re-waking, re-arm to test", code, src_ma, snk_ma);
+}
+#endif
+
+static void test_command(uint32_t cmd)
+{
+  switch (cmd)
+  {
+    case APP_CMD_ARM:
+      test_arm();
+      break;
+    case APP_CMD_DISARM:
+      motor_disarm();
+      debug_log("PWM disarmed by command: moe=%u pins=0x%02lX", pwm_is_armed() ? 1U : 0U, board_pwm_pins_read());
+      break;
+    case APP_CMD_SW_BREAK:
+      pwm_software_break();
+      debug_log("PWM software break: moe=%u pins=0x%02lX (expect moe=0 pins=0x00)",
+                pwm_is_armed() ? 1U : 0U, board_pwm_pins_read());
+      break;
+#if BRINGUP_STAGE == 6
+    case APP_CMD_SWEEP:
+      if (!pwm_is_armed())
+      {
+        debug_log("SWEEP refused: arm first (g_app_cmd = 1)");
+        break;
+      }
+      s_sweeping = true;
+      s_sweep_step = 0U;
+      sweep_apply_step();
+      break;
+    case APP_CMD_IDRIVE:
+      test_apply_idrive();
+      break;
+#endif
+    default:
+      debug_log("CMD %lu unknown", cmd);
+      break;
+  }
+}
+
+static void test_tick(uint32_t now_ms)
 {
   uint32_t cmd = g_app_cmd;
   if (cmd != APP_CMD_NONE)
   {
     g_app_cmd = APP_CMD_NONE;
-    if (cmd == APP_CMD_ARM)
-    {
-      const char *reason;
-      pwm_set_duty(PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD);
-      TIM1->EGR = TIM_EGR_UG;   /* zero command in effect before arming */
-      if (motor_can_arm(&reason))
-      {
-        s_ramp_ms = 0U;
-        s_ramping = true;
-        debug_log("PWM armed from zero command; ramping to A=%u%% B=%u%% C=%u%% over %ums",
-                  (unsigned)(STAGE5_DUTY_A * 100.0f), (unsigned)(STAGE5_DUTY_B * 100.0f),
-                  (unsigned)(STAGE5_DUTY_C * 100.0f), STAGE5_RAMP_MS);
-      }
-      else
-      {
-        debug_log("PWM arm refused: %s", reason);
-      }
-    }
-    else if (cmd == APP_CMD_DISARM)
-    {
-      motor_disarm();
-      s_ramping = false;
-      debug_log("PWM disarmed by command: moe=%u pins=0x%02lX", pwm_is_armed() ? 1U : 0U, board_pwm_pins_read());
-    }
-    else if (cmd == APP_CMD_SW_BREAK)
-    {
-      pwm_software_break();
-      s_ramping = false;
-      debug_log("PWM software break: moe=%u pins=0x%02lX (expect moe=0 pins=0x00)",
-                pwm_is_armed() ? 1U : 0U, board_pwm_pins_read());
-    }
-    else
-    {
-      debug_log("CMD %lu unknown (1 arm, 2 disarm, 3 software break)", cmd);
-    }
+    test_command(cmd);
   }
 
-  if (s_ramping && pwm_is_armed())
+  if (pwm_is_armed())
   {
-    s_ramp_ms++;
-    float k = (float)s_ramp_ms / (float)STAGE5_RAMP_MS;
-    if (k >= 1.0f)
-    {
-      k = 1.0f;
-      s_ramping = false;
-    }
-    pwm_set_duty(PWM_DUTY_ZERO_CMD + k * (STAGE5_DUTY_A - PWM_DUTY_ZERO_CMD),
-                 PWM_DUTY_ZERO_CMD + k * (STAGE5_DUTY_B - PWM_DUTY_ZERO_CMD),
-                 PWM_DUTY_ZERO_CMD + k * (STAGE5_DUTY_C - PWM_DUTY_ZERO_CMD));
+#if BRINGUP_STAGE == 6
+    sweep_tick();
+#endif
+    s_duty[PHASE_A] = test_slew(s_duty[PHASE_A], test_target(g_duty_a));
+    s_duty[PHASE_B] = test_slew(s_duty[PHASE_B], test_target(g_duty_b));
+    s_duty[PHASE_C] = test_slew(s_duty[PHASE_C], test_target(g_duty_c));
+    pwm_set_duty(s_duty[PHASE_A], s_duty[PHASE_B], s_duty[PHASE_C]);
   }
+#if BRINGUP_STAGE == 6
+  else
+  {
+    s_sweeping = false;   /* a break or fault ends the sweep */
+  }
+#endif
 
-  if ((now_ms % STAGE5_LOG_PERIOD_MS) == 0U)
+  if ((now_ms % TEST_LOG_PERIOD_MS) == 0U)
   {
     uint32_t a;
     uint32_t b;
     uint32_t c;
+    const char *drv = drv8323_is_configured() ? "CFG" : (drv8323_is_awake() ? "AWAKE" : "ASLEEP");
     pwm_get_duty_permille(&a, &b, &c);
-    debug_log("PWM armed=%u duty_permille A=%lu B=%lu C=%lu enable=%u nfault=%s breaks=%lu fault=%s",
-              pwm_is_armed() ? 1U : 0U, a, b, c,
-              ((BOARD_DRV_ENABLE_PORT->ODR & BOARD_DRV_ENABLE_PIN) != 0U) ? 1U : 0U,
-              drv8323_nfault_low() ? "LOW" : "high", pwm_break_events(), fault_name(fault_first()));
+    debug_log("PWM armed=%u A=%lu B=%lu C=%lu vm=%lumV drv=%s nf=%s idrive=0x%02X brk=%lu fault=%s",
+              pwm_is_armed() ? 1U : 0U, a, b, c, power_vm_mv(), drv,
+              drv8323_nfault_low() ? "LOW" : "high", (unsigned)drv8323_idrive(),
+              pwm_break_events(), fault_name(fault_first()));
   }
 }
 #endif
@@ -865,9 +1021,15 @@ void app_init(void)
   bool pwm_ok = pwm_init(&what);
   debug_log("PWM tim1 center 20kHz dt=100ns brk=PB10 low trgo2=OC4REF ccr4=4200 %s (%s); dbg freeze on, counter running, moe=%u",
             pwm_ok ? "OK" : "FAIL", what, pwm_is_armed() ? 1U : 0U);
+  debug_log("PWM sysbrk lockup+sram_parity+flash_ecc cfgr2=0x%03lX", SYSCFG->CFGR2);
 #endif
 #if BRINGUP_STAGE == 5
   debug_log("STAGE5 DRV held asleep. Commands: set g_app_cmd = 1 arm, 2 disarm, 3 software break");
+#elif BRINGUP_STAGE == 6
+  debug_log("STAGE6 g_app_cmd: 1 arm, 2 disarm, 3 sw break, 4 sweep, 5 apply g_drv_idrive");
+  debug_log("STAGE6 targets g_duty_a/b/c (0..0.93), now A=%u B=%u C=%u permille",
+            (unsigned)(g_duty_a * 1000.0f), (unsigned)(g_duty_b * 1000.0f), (unsigned)(g_duty_c * 1000.0f));
+  debug_log("STAGE6 g_phase_off: 1 = A, 2 = B, 4 = C held off (both FETs) from the next arm");
 #endif
 
   s_last_tick_ms = HAL_GetTick();
@@ -907,8 +1069,8 @@ void app_loop(void)
     stage3_tick(s_last_tick_ms);
 #elif BRINGUP_STAGE == 4
     stage4_tick(s_last_tick_ms);
-#elif BRINGUP_STAGE == 5
-    stage5_tick(s_last_tick_ms);
+#elif (BRINGUP_STAGE == 5) || (BRINGUP_STAGE == 6)
+    test_tick(s_last_tick_ms);
 #endif
     uint32_t elapsed = debug_cycles() - start;
     if (elapsed > s_task_max_cycles)

@@ -13,6 +13,7 @@
 #ifndef PWM_H
 #define PWM_H
 
+#include "board.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -41,6 +42,16 @@ bool pwm_is_armed(void);
 /** Duty per phase, 0..1, clamped to [0, PWM_DUTY_MAX]. Register writes
  *  only; safe in the control interrupt. Takes effect at the next update. */
 void pwm_set_duty(float a, float b, float c);
+
+/** Stage 6 diagnostic, while disarmed only (returns false if armed):
+ *  on = false takes a phase's INH and INL pins from TIM1 and drives them
+ *  low as GPIO, so the DRV holds both its FETs off and the phase floats;
+ *  on = true gives them back to TIM1. */
+bool pwm_phase_output(board_phase_t ph, bool on);
+
+/** While disarmed: 50 % on all phases, loaded at once (UG), so
+ *  motor_can_arm() sees a zero command. Does nothing while armed. */
+void pwm_zero_command(void);
 
 /** Duties as written, in permille, for logging. */
 void pwm_get_duty_permille(uint32_t *a, uint32_t *b, uint32_t *c);

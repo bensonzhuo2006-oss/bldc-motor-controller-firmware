@@ -26,6 +26,35 @@
 /* OCxM = 0110: PWM mode 1 (CCMR1/2 OC1M..OC4M low three bits). */
 #define PWM_OCM_PWM1         6UL
 
+/* System break sources connected to TIM1 (RM0440 Table 271, SYSCFG_CFGR2):
+ * core lockup, SRAM parity error, flash double-ECC error. CSS is always
+ * connected; PVD isn't configured. */
+#define PWM_SYS_BREAK_SOURCES  (SYSCFG_CFGR2_CLL | SYSCFG_CFGR2_SPL | SYSCFG_CFGR2_ECCL)
+
+/* Break flags: external/software break and system break. */
+#define PWM_BREAK_FLAGS        (TIM_SR_BIF | TIM_SR_SBIF)
+
+/* GPIO MODER field values. */
+#define PWM_MODER_OUTPUT     1UL
+#define PWM_MODER_AF         2UL
+
+/* Gate-input pins per phase (plan pin map) and their TIM1 CCER enables. */
+typedef struct
+{
+  GPIO_TypeDef *inh_port;
+  uint32_t      inh_pin;    /* pin number */
+  GPIO_TypeDef *inl_port;
+  uint32_t      inl_pin;
+  uint32_t      ccer;       /* CCxE | CCxNE */
+} pwm_phase_io_t;
+
+static const pwm_phase_io_t s_phase_io[PHASE_COUNT] =
+{
+  [PHASE_A] = { GPIOA, 10U, GPIOB, 15U, TIM_CCER_CC3E | TIM_CCER_CC3NE },
+  [PHASE_B] = { GPIOA,  9U, GPIOB, 14U, TIM_CCER_CC2E | TIM_CCER_CC2NE },
+  [PHASE_C] = { GPIOA,  8U, GPIOB, 13U, TIM_CCER_CC1E | TIM_CCER_CC1NE },
+};
+
 /* ---- State ---------------------------------------------------------------- */
 
 static volatile bool s_break_event;
@@ -35,7 +64,7 @@ static volatile uint32_t s_break_events;
 
 static inline uint32_t pwm_duty_to_ccr(float d)
 {
-  if (d < 0.0f)
+  if (!(d >= 0.0f))   /* also catches NaN */
   {
     d = 0.0f;
   }
@@ -44,6 +73,11 @@ static inline uint32_t pwm_duty_to_ccr(float d)
     d = PWM_DUTY_MAX;
   }
   return (uint32_t)(d * (float)PWM_ARR + 0.5f);
+}
+
+static void pwm_pin_mode(GPIO_TypeDef *port, uint32_t pin, uint32_t mode)
+{
+  port->MODER = (port->MODER & ~(3UL << (2U * pin))) | (mode << (2U * pin));
 }
 
 static uint32_t pwm_oc_mode(uint32_t ccmr, uint32_t shift_lo, uint32_t bit3)
@@ -55,7 +89,10 @@ static uint32_t pwm_oc_mode(uint32_t ccmr, uint32_t shift_lo, uint32_t bit3)
 
 bool pwm_init(const char **what)
 {
-  *what = "OK";
+  /* Pass/fail is *what == ok, by pointer: a mismatch message can start with
+   * the same letters ("OCxM ..."). */
+  static const char ok[] = "OK";
+  *what = ok;
 
   if (TIM1->ARR != PWM_ARR)                                   { *what = "ARR"; }
   else if ((TIM1->CR1 & TIM_CR1_CMS) != PWM_CMS_CENTER1)      { *what = "CMS"; }
@@ -80,11 +117,21 @@ bool pwm_init(const char **what)
    * (RM0440 DBGMCU_APB2FZR DBG_TIM1_STOP; TIM1 "Debug mode"). */
   DBGMCU->APB2FZ |= DBGMCU_APB2FZ_DBG_TIM1_STOP;
 
+  /* Connect the system break sources, so a core lockup (fault inside the
+   * HardFault handler), SRAM parity or flash double-ECC error turns the
+   * outputs off in hardware. Set once; cleared only by a system reset.
+   * SPF is write-1-to-clear, so it's kept out of the write. */
+  __HAL_RCC_SYSCFG_CLK_ENABLE();
+  SYSCFG->CFGR2 = (SYSCFG->CFGR2 & ~SYSCFG_CFGR2_SPF) | PWM_SYS_BREAK_SOURCES;
+  if (((SYSCFG->CFGR2 & PWM_SYS_BREAK_SOURCES) != PWM_SYS_BREAK_SOURCES) && (*what == ok))
+  {
+    *what = "SYSCFG_CFGR2 system break";
+  }
+
   /* Outputs safe and off (MOE = 0, OSSI = OSSR = 1, idle low,
    * CCxE = CCxNE = 1 for channels 1-3), zero command. */
   board_tim1_outputs_safe();
-  pwm_set_duty(PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD);
-  TIM1->EGR = TIM_EGR_UG;           /* load the preloaded CCRs */
+  pwm_zero_command();
 
   /* Break flag from any earlier nFAULT pulse (wake/sleep in Stages 3-4)
    * cleared. The break interrupt stays off while disarmed: motor_can_arm()
@@ -92,12 +139,12 @@ bool pwm_init(const char **what)
    * be cleared while the break input is active (RM0440 TIMx_SR BIF), so a
    * held-low nFAULT with BIE = 1 would re-enter the interrupt forever, and
    * the DRV's wake/sleep nFAULT pulses would latch faults while disarmed. */
-  TIM1->SR = ~TIM_SR_BIF;
+  TIM1->SR = ~PWM_BREAK_FLAGS;
   TIM1->DIER &= ~TIM_DIER_BIE;
 
   TIM1->CR1 |= TIM_CR1_CEN;         /* counter runs; outputs stay off (MOE = 0) */
 
-  return (*what)[0] == 'O';
+  return *what == ok;
 }
 
 bool motor_can_arm(const char **reason)
@@ -133,7 +180,7 @@ bool motor_can_arm(const char **reason)
 
   uint32_t primask = __get_PRIMASK();
   __disable_irq();
-  TIM1->SR = ~TIM_SR_BIF;           /* break flag cleared before arming */
+  TIM1->SR = ~PWM_BREAK_FLAGS;      /* break flags cleared before arming */
   TIM1->DIER |= TIM_DIER_BIE;       /* break events latched while armed */
   TIM1->BDTR |= TIM_BDTR_MOE;
   __set_PRIMASK(primask);
@@ -163,6 +210,46 @@ void pwm_set_duty(float a, float b, float c)
   BOARD_CCR_PHASE_A = pwm_duty_to_ccr(a);
   BOARD_CCR_PHASE_B = pwm_duty_to_ccr(b);
   BOARD_CCR_PHASE_C = pwm_duty_to_ccr(c);
+}
+
+bool pwm_phase_output(board_phase_t ph, bool on)
+{
+  const pwm_phase_io_t *io;
+  if (pwm_is_armed() || (ph >= PHASE_COUNT))
+  {
+    return false;
+  }
+  io = &s_phase_io[ph];
+  if (on)
+  {
+    /* Channel enabled first (driven low by OSSI while disarmed), then the
+     * pins handed back to TIM1. */
+    TIM1->CCER |= io->ccer;
+    pwm_pin_mode(io->inh_port, io->inh_pin, PWM_MODER_AF);
+    pwm_pin_mode(io->inl_port, io->inl_pin, PWM_MODER_AF);
+  }
+  else
+  {
+    /* Pins already low (disarmed); latch low in ODR, switch to GPIO output,
+     * then disable the channel. INH = INL = 0: both FETs off (DRV 6x mode,
+     * Table 8-2), driven, not left to the DRV pull-downs. */
+    io->inh_port->BRR = 1UL << io->inh_pin;
+    io->inl_port->BRR = 1UL << io->inl_pin;
+    pwm_pin_mode(io->inh_port, io->inh_pin, PWM_MODER_OUTPUT);
+    pwm_pin_mode(io->inl_port, io->inl_pin, PWM_MODER_OUTPUT);
+    TIM1->CCER &= ~io->ccer;
+  }
+  return true;
+}
+
+void pwm_zero_command(void)
+{
+  if (pwm_is_armed())
+  {
+    return;   /* UG would restart the PWM period mid-cycle */
+  }
+  pwm_set_duty(PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD, PWM_DUTY_ZERO_CMD);
+  TIM1->EGR = TIM_EGR_UG;           /* load the preloaded CCRs now */
 }
 
 void pwm_get_duty_permille(uint32_t *a, uint32_t *b, uint32_t *c)

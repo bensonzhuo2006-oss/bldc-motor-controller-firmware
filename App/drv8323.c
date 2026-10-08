@@ -78,14 +78,44 @@ static volatile bool s_nfault_event;
 static volatile uint32_t s_nfault_events;
 static volatile uint32_t s_nfault_blanked_events;
 
-/* Expected 0x02-0x06 after configure (0x03 locked). */
-static const uint16_t s_shadow[DRV_REG_COUNT] =
+/* IDRIVE code for 0x03 and 0x04; changed only while asleep. */
+static uint8_t s_idrive = DRV_CFG_IDRIVE;
+
+/* Peak gate currents per 4-bit code, mA (datasheet Tables 8-16, 8-17). */
+static const uint16_t s_idrivep_ma[16] =
 {
-  0U, 0U, DRV_CFG_DRIVER_CTRL, DRV_CFG_GATE_HS_LOCKED, DRV_CFG_GATE_LS,
-  DRV_CFG_OCP_CTRL, DRV_CFG_CSA_CTRL
+  10U, 30U, 60U, 80U, 120U, 140U, 170U, 190U, 260U, 330U, 370U, 440U, 570U, 680U, 820U, 1000U
+};
+static const uint16_t s_idriven_ma[16] =
+{
+  20U, 60U, 120U, 160U, 240U, 280U, 340U, 380U, 520U, 660U, 740U, 880U, 1140U, 1360U, 1640U, 2000U
 };
 
 /* ---- Helpers -------------------------------------------------------------- */
+
+/* ENABLE as driven. motor_disarm() can drop it without drv8323_sleep()
+ * (disarm command, fault path, later the control interrupt); sleep resets
+ * the registers and disables SPI (datasheet 8.4.1.1), so awake/configured
+ * hold only while ENABLE is high. */
+static inline bool drv_enable_high(void)
+{
+  return (BOARD_DRV_ENABLE_PORT->ODR & BOARD_DRV_ENABLE_PIN) != 0U;
+}
+
+/* Configured value of control register 0x02-0x06, 0x03 as locked: the
+ * shadow copy for the readback check. */
+static uint16_t drv_cfg_value(uint8_t addr)
+{
+  switch (addr)
+  {
+    case DRV_REG_DRIVER_CTRL: return DRV_CFG_DRIVER_CTRL;
+    case DRV_REG_GATE_HS:     return (uint16_t)(DRV_GATE_HS_LOCK_ON | s_idrive);
+    case DRV_REG_GATE_LS:     return (uint16_t)(DRV_CFG_GATE_LS_CTRL | s_idrive);
+    case DRV_REG_OCP_CTRL:    return DRV_CFG_OCP_CTRL;
+    case DRV_REG_CSA_CTRL:    return DRV_CFG_CSA_CTRL;
+    default:                  return 0U;
+  }
+}
 
 static inline void drv_wait_cycles(uint32_t cycles)
 {
@@ -219,15 +249,12 @@ void EXTI15_10_IRQHandler(void)
 
 bool drv8323_configure(drv_cfg_result_t *r)
 {
-  /* Unlocked register writes, in order; 0x03 last so LOCK stays 011b. */
+  /* Unlocked register writes, in order; 0x03 last, with LOCK 011b. */
   static const uint8_t order[] =
   {
     DRV_REG_DRIVER_CTRL, DRV_REG_GATE_LS, DRV_REG_OCP_CTRL, DRV_REG_CSA_CTRL, DRV_REG_GATE_HS
   };
-  static const uint16_t values[] =
-  {
-    DRV_CFG_DRIVER_CTRL, DRV_CFG_GATE_LS, DRV_CFG_OCP_CTRL, DRV_CFG_CSA_CTRL, DRV_CFG_GATE_HS_UNLOCKED
-  };
+  const uint16_t hs_unlocked = (uint16_t)(DRV_GATE_HS_LOCK_OFF | s_idrive);
   uint16_t rb = 0U;
 
   s_configured = false;
@@ -245,11 +272,12 @@ bool drv8323_configure(drv_cfg_result_t *r)
 
   for (uint32_t i = 0U; i < (sizeof(order) / sizeof(order[0])); i++)
   {
-    if (!drv8323_write_verify(order[i], values[i], &rb))
+    uint16_t v = (order[i] == DRV_REG_GATE_HS) ? hs_unlocked : drv_cfg_value(order[i]);
+    if (!drv8323_write_verify(order[i], v, &rb))
     {
       r->status = DRV_CFG_WRITE_FAIL;
       r->addr = order[i];
-      r->wrote = values[i];
+      r->wrote = v;
       r->read = rb;
       return false;
     }
@@ -277,8 +305,8 @@ bool drv8323_configure(drv_cfg_result_t *r)
 
   /* Lock. */
   r->addr = DRV_REG_GATE_HS;
-  r->wrote = DRV_CFG_GATE_HS_LOCKED;
-  if (!drv8323_write_verify(DRV_REG_GATE_HS, DRV_CFG_GATE_HS_LOCKED, &rb))
+  r->wrote = drv_cfg_value(DRV_REG_GATE_HS);
+  if (!drv8323_write_verify(DRV_REG_GATE_HS, r->wrote, &rb))
   {
     r->status = DRV_CFG_LOCK_FAIL;
     r->read = rb;
@@ -303,7 +331,17 @@ bool drv8323_configure(drv_cfg_result_t *r)
 
 bool drv8323_is_configured(void)
 {
-  return s_configured;
+  return s_configured && drv_enable_high();
+}
+
+bool drv8323_sync(void)
+{
+  if (s_awake && !drv_enable_high())
+  {
+    drv8323_sleep();   /* finish the sleep: SPI3 off, PD2 released, tSLEEP timer */
+    return true;
+  }
+  return false;
 }
 
 bool drv8323_check_config(uint8_t *addr, uint16_t *value)
@@ -312,7 +350,7 @@ bool drv8323_check_config(uint8_t *addr, uint16_t *value)
   {
     uint16_t v = 0U;
     bool ok = drv8323_read(a, &v);
-    if (!ok || (v != s_shadow[a]))
+    if (!ok || (v != drv_cfg_value(a)))
     {
       *addr = a;
       *value = v;
@@ -320,6 +358,27 @@ bool drv8323_check_config(uint8_t *addr, uint16_t *value)
     }
   }
   return true;
+}
+
+bool drv8323_set_idrive(uint8_t code)
+{
+  if (s_awake)
+  {
+    return false;
+  }
+  s_idrive = code;
+  return true;
+}
+
+uint8_t drv8323_idrive(void)
+{
+  return s_idrive;
+}
+
+void drv8323_idrive_ma(uint8_t code, uint32_t *source_ma, uint32_t *sink_ma)
+{
+  *source_ma = s_idrivep_ma[(code >> 4) & 0xFU];
+  *sink_ma = s_idriven_ma[code & 0xFU];
 }
 
 uint32_t drv8323_nfault_events(void)
@@ -384,7 +443,7 @@ void drv8323_sleep(void)
 
 bool drv8323_is_awake(void)
 {
-  return s_awake;
+  return s_awake && drv_enable_high();
 }
 
 bool drv8323_nfault_low(void)
@@ -394,7 +453,7 @@ bool drv8323_nfault_low(void)
 
 bool drv8323_read(uint8_t addr, uint16_t *value)
 {
-  if (!s_awake)
+  if (!drv8323_is_awake())
   {
     return false;
   }
@@ -404,7 +463,7 @@ bool drv8323_read(uint8_t addr, uint16_t *value)
 
 bool drv8323_write(uint8_t addr, uint16_t value, uint16_t *previous)
 {
-  if (!s_awake)
+  if (!drv8323_is_awake())
   {
     return false;
   }

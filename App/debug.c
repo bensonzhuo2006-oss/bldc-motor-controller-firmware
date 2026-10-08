@@ -99,7 +99,38 @@ bool debug_init(void)
   return ok;
 }
 
-/* ---- HardFault dump ------------------------------------------------------- */
+/* ---- HardFault and NMI dumps ---------------------------------------------- */
+
+/* Make the power stage safe first, in disarm order: outputs off, then
+ * DRV ENABLE low (plan: Hard rules, disarm order). Register writes only,
+ * so it works whatever state the crash left behind. */
+static void debug_fault_safe(void)
+{
+  TIM1->BDTR &= ~TIM_BDTR_MOE;
+  BOARD_DRV_ENABLE_PORT->BRR = BOARD_DRV_ENABLE_PIN;
+}
+
+static void debug_fault_halt(void) __attribute__((noreturn));
+
+static void debug_fault_halt(void)
+{
+  /* With a debugger attached, stop here so the state can be inspected.
+   * Without one, BKPT would escalate to lockup, so it's skipped. */
+  if ((CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) != 0U)
+  {
+    __BKPT(0);
+  }
+
+  /* Fast LED blink marks a fault without a debugger. */
+  for (;;)
+  {
+    uint32_t odr = BOARD_LED_PORT->ODR;
+    BOARD_LED_PORT->BSRR = ((odr & BOARD_LED_PIN) << 16U) | (~odr & BOARD_LED_PIN);
+    for (volatile uint32_t i = 0U; i < DEBUG_FAULT_BLINK_LOOPS; i++)
+    {
+    }
+  }
+}
 
 /* Called from HardFault_Handler with the stacked exception frame
  * (r0, r1, r2, r3, r12, lr, pc, xpsr) and the EXC_RETURN value. */
@@ -107,10 +138,7 @@ void debug_fault_report(const uint32_t *frame, uint32_t exc_return) __attribute_
 
 void debug_fault_report(const uint32_t *frame, uint32_t exc_return)
 {
-  /* Make the power stage safe first, in disarm order: outputs off, then
-   * DRV ENABLE low (plan: Hard rules, disarm order). */
-  TIM1->BDTR &= ~TIM_BDTR_MOE;
-  BOARD_DRV_ENABLE_PORT->BRR = BOARD_DRV_ENABLE_PIN;
+  debug_fault_safe();
 
   debug_put_str("\nFAULT HardFault\nFAULT pc=");
   debug_put_hex32(frame[6]);
@@ -140,22 +168,25 @@ void debug_fault_report(const uint32_t *frame, uint32_t exc_return)
   debug_put_hex32(exc_return);
   debug_put_str("\n");
 
-  /* With a debugger attached, stop here so the state can be inspected.
-   * Without one, BKPT would escalate to lockup, so it's skipped. */
-  if ((CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) != 0U)
-  {
-    __BKPT(0);
-  }
+  debug_fault_halt();
+}
 
-  /* Fast LED blink marks a fault without a debugger. */
-  for (;;)
-  {
-    uint32_t odr = BOARD_LED_PORT->ODR;
-    BOARD_LED_PORT->BSRR = ((odr & BOARD_LED_PIN) << 16U) | (~odr & BOARD_LED_PIN);
-    for (volatile uint32_t i = 0U; i < DEBUG_FAULT_BLINK_LOOPS; i++)
-    {
-    }
-  }
+/* NMI sources on this board: flash double-ECC error (FLASH_ECCR ECCD) and
+ * SRAM parity error (SYSCFG_CFGR2 SPF); the third source, HSE CSS, isn't
+ * enabled (RM0440 vector table, NMI). Both are also TIM1 system break
+ * sources (pwm_init), so the outputs are already off in hardware; this
+ * covers ENABLE and the report. */
+void debug_nmi_report(void)
+{
+  debug_fault_safe();
+
+  debug_put_str("\nFAULT NMI flash_eccr=");
+  debug_put_hex32(FLASH->ECCR);
+  debug_put_str(" syscfg_cfgr2=");
+  debug_put_hex32(SYSCFG->CFGR2);
+  debug_put_str("\n");
+
+  debug_fault_halt();
 }
 
 /* Replaces the CubeMX-generated handler (requires "Generate IRQ handler"

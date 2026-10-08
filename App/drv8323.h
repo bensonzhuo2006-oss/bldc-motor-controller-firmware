@@ -42,12 +42,14 @@
 #define DRV_GATE_HS_LOCK_OFF     0x300U   /* 011b: unlock */
 
 /* Bring-up configuration (plan: DRV8323 register table, "Bring-up value").
- * If IDRIVE is retuned in Stage 6, change GATE_HS and GATE_LS here; the
- * shadow copy for the readback check follows. */
+ * Registers 0x03 and 0x04 carry IDRIVE in bits 7-0 (IDRIVEP << 4 | IDRIVEN,
+ * datasheet Tables 8-16 and 8-17), the same code on the high and low side.
+ * DRV_CFG_IDRIVE is the boot value; Stage 6 can retune it at run time with
+ * drv8323_set_idrive(). The shadow copy for the readback check follows it.
+ * Bring-up values: 0x03 = 0x322 unlocked / 0x622 locked, 0x04 = 0x722. */
 #define DRV_CFG_DRIVER_CTRL       0x000U   /* 6x PWM, fault reporting on */
-#define DRV_CFG_GATE_HS_UNLOCKED  0x322U   /* LOCK 011b, IDRIVEP 60 mA, IDRIVEN 120 mA */
-#define DRV_CFG_GATE_HS_LOCKED    0x622U   /* LOCK 110b after setup */
-#define DRV_CFG_GATE_LS           0x722U   /* CBC 1, TDRIVE 4 us, IDRIVE 60/120 mA */
+#define DRV_CFG_IDRIVE            0x22U    /* IDRIVEP 60 mA, IDRIVEN 120 mA */
+#define DRV_CFG_GATE_LS_CTRL      0x700U   /* 0x04 bits 10-8: CBC 1, TDRIVE 11b = 4 us */
 #define DRV_CFG_OCP_CTRL          0x110U   /* 100 ns dead time, latched OCP, 4 us deglitch, VDS 0.06 V */
 #define DRV_CFG_CSA_CTRL          0x2C3U   /* VREF/2, 40 V/V, CAL off, SEN_LVL 1 V */
 #define DRV_CSA_CAL_ALL           0x01CU   /* CSA_CAL_A/B/C, bits 4..2 */
@@ -82,12 +84,27 @@ bool drv8323_init(void);
  *  "DRV8323: register readback" checks 1 and 2). */
 bool drv8323_configure(drv_cfg_result_t *result);
 
-/** True after a successful drv8323_configure(), until the next sleep. */
+/** True after a successful drv8323_configure(), until the next sleep or
+ *  until ENABLE goes low (any disarm). */
 bool drv8323_is_configured(void);
+
+/** If a disarm dropped ENABLE while awake, finish the sleep (SPI3 off, PD2
+ *  released, tSLEEP timer) so the next wake reconfigures. Main loop, every
+ *  tick. Returns true if it did. */
+bool drv8323_sync(void);
 
 /** Read 0x02-0x06 and compare with the configured shadow copy (readback
  *  check 3). On a mismatch, addr/value say where. */
 bool drv8323_check_config(uint8_t *addr, uint16_t *value);
+
+/** IDRIVE code (IDRIVEP << 4 | IDRIVEN) for both sides. Changeable only
+ *  while asleep (returns false if awake); the next wake's configure writes,
+ *  verifies and locks it. */
+bool drv8323_set_idrive(uint8_t code);
+uint8_t drv8323_idrive(void);
+
+/** Peak source and sink gate current of an IDRIVE code, in mA. */
+void drv8323_idrive_ma(uint8_t code, uint32_t *source_ma, uint32_t *sink_ma);
 
 /** nFAULT falling edges seen by the interrupt: outside the wake/sleep
  *  window (real faults) and inside it (ignored wake/sleep pulses). */
@@ -106,6 +123,7 @@ bool drv8323_wake(void);
  *  PD2 released to analog (R38 keeps nSCS high). */
 void drv8323_sleep(void);
 
+/** Woken and ENABLE still high. */
 bool drv8323_is_awake(void);
 
 /** nFAULT pin level: true when low (fault, or during wake/sleep). */
