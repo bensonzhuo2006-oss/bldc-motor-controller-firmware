@@ -48,7 +48,9 @@ void pwm_get_duty_permille(uint32_t *a, uint32_t *b, uint32_t *c);
 /** Software break (TIM1 EGR.BG): MOE cleared in hardware, BIF set. */
 void pwm_software_break(void);
 
-/** True once if a break (hardware or software) happened since the last call. */
+/** True once if a break (hardware or software) happened while armed since
+ *  the last call. Breaks while disarmed (outputs already off, e.g. the DRV's
+ *  wake/sleep nFAULT pulses) aren't reported; the nFAULT EXTI covers those. */
 bool pwm_take_break_event(void);
 uint32_t pwm_break_events(void);
 

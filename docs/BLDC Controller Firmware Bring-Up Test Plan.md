@@ -264,12 +264,12 @@ These stages prove everything up to the gate driver without switching any MOSFET
 - **Under test:** encoder setup, link, frame decode and fault detection.
 - **Connected:** USB power, ST-Link, encoder board on J14, magnet on the motor. Motor leads unconnected. No 12 V.
 - **Encoder setup checklist (before any firmware test):**
-  - [ ] The encoder board's MODE pin selects I2C/SSI output, not ABZ. In ABZ mode the SPI read returns garbage.
-  - [ ] The magnet is diametrically magnetized (poles across the face, not top/bottom).
-  - [ ] The magnet is centered on the rotor's rotation axis. On this hollow-shaft motor, check it isn't offset.
-  - [ ] The gap between the magnet and the MT6701 chip is 0.5–2 mm, typically 1 mm (MT6701 datasheet air gap).
-  - [ ] The encoder board is fixed to the stator side, so only the magnet turns with the rotor.
-  - [ ] J14 wiring: pin 1 = 3.3 V, pin 2 = MOSI (PA7, dummy data), pin 3 = DO (PA6), pin 4 = CLK (PA5), pin 5 = CSN (PA4), pin 6 = GND.
+  - [x] The encoder board's MODE pin selects I2C/SSI output, not ABZ. In ABZ mode the SPI read returns garbage. (Confirmed by Stage 1: clean SSI frames, crc = 0.)
+  - [x] The magnet is diametrically magnetized (poles across the face, not top/bottom). (Motor and encoder supplied assembled, 2026-10-08.)
+  - [x] The magnet is centered on the rotor's rotation axis. On this hollow-shaft motor, check it isn't offset. (Supplied assembled.)
+  - [x] The gap between the magnet and the MT6701 chip is 0.5–2 mm, typically 1 mm (MT6701 datasheet air gap). (Supplied assembled; field status NORMAL in Stage 1.)
+  - [x] The encoder board is fixed to the stator side, so only the magnet turns with the rotor. (Supplied assembled.)
+  - [x] J14 wiring: pin 1 = 3.3 V, pin 2 = MOSI (PA7, dummy data), pin 3 = DO (PA6), pin 4 = CLK (PA5), pin 5 = CSN (PA4), pin 6 = GND. (Confirmed by Stage 1 reads.)
   - [x] J14 pin 2 (MOSI) is not connected on the encoder board, so the dummy MOSI data goes nowhere (confirmed 2026-10-04).
 - **Firmware added:** `mt6701` driver.
   - SPI1: mode 1, full-duplex master with dummy transmit, two 12-bit frames per read, software chip select on PA4.
@@ -595,7 +595,7 @@ All modules live outside the CubeMX "USER CODE" sections, so regenerating the pr
 
 **Stage prerequisites** (each blocks its stage until done)
 
-- [ ] Stage 1: encoder MODE pin set for I2C/SSI, magnet checks done (Stage 1 setup checklist).
+- [x] Stage 1: encoder MODE pin set for I2C/SSI, magnet checks done (Stage 1 setup checklist).
 - [ ] Stage 8: motor line-to-line resistance measured (expect about 3.2 Ω) to confirm the delta conversion.
 - [ ] Stage 8: current readings confirmed against a multimeter before the trip is raised above 1 A.
 - [ ] Stage 13: inductance measured and current-loop gains recomputed from the measured R and L.
@@ -764,7 +764,7 @@ Dated record of findings, decisions and measured results, newest last. Each entr
   - MMS2 = OC4REF, CCR4 = 4200.
   - Channels 1–4 in PWM mode 1.
 - **Debugger freeze:** DBGMCU APB2FZ DBG\_TIM1\_STOP set at boot. RM0440 (TIM1 debug mode): with the counter stopped, "the outputs are disabled (as if the MOE bit was reset)", and with OSSI = 1 they go to their inactive (low) level. MOE itself stays set, so PWM resumes after the halt.
-- **Idle:** MOE = 0, OSSI = OSSR = 1, OISx = 0, CCxE = CCxNE = 1 → all six outputs driven low; the counter runs. Duties start at 50 % (zero command) and CCRs are loaded with UG. BIF cleared, then BIE enabled: `HAL_TIMEx_BreakCallback` latches the event, and the main loop raises FAULT\_PWM\_BREAK. The fault response calls `motor_disarm()`, and the fault stays latched until `g_fault_clear_request`.
+- **Idle:** MOE = 0, OSSI = OSSR = 1, OISx = 0, CCxE = CCxNE = 1 → all six outputs driven low; the counter runs. Duties start at 50 % (zero command) and CCRs are loaded with UG. BIF cleared; the break interrupt (BIE) is enabled only while armed (see the 2026-10-08 entry): `HAL_TIMEx_BreakCallback` turns BIE off, latches the event, and the main loop raises FAULT\_PWM\_BREAK. The fault response calls `motor_disarm()`, and the fault stays latched until `g_fault_clear_request`.
 - **`motor_can_arm()`** is the only code that sets MOE. It refuses if:
   - already armed, or a fault is latched;
   - the debug freeze is off, OSSI/OSSR aren't set, AOE is set, idle levels aren't low, or the counter isn't running;
@@ -776,3 +776,18 @@ Dated record of findings, decisions and measured results, newest last. Each entr
   It clears BIF, sets MOE, and confirms MOE actually set.
 - **Duty writes:** `pwm_set_duty(a, b, c)` clamps to \[0, 0.93\] and writes CCR3/CCR2/CCR1 for A/B/C (register writes only, safe in the interrupt).
 - **Stage 5 test mode:** the DRV is held asleep (ENABLE low). Debugger commands via `g_app_cmd`: 1 = arm from the zero command and ramp over 500 ms to A = 20 %, B = 50 %, C = 80 %; 2 = disarm; 3 = software break (EGR.BG). Status line every second: armed, duties in permille, ENABLE, nFAULT, break count, fault.
+
+### 2026-10-08: encoder checklist closed; shoot-through review before the Stage 5 build
+
+- **Stage 1 checklist ticked:** the developer reports the motor and encoder were supplied assembled (magnet type, centring, gap, mounting). The MODE pin and J14 wiring are confirmed by Stage 1's clean SSI reads. The Stage 1 prerequisite box is ticked to match the 2026-10-04 entry.
+- **Shoot-through review (code, `tim.c`, RM0440, SLVSDJ3D, DS13122):** no path found that turns on both FETs of one half-bridge.
+  - **Pairing:** each half-bridge is driven by one TIM1 channel and its complement: C = CH1/CH1N (PA8/PB13), B = CH2/CH2N (PA9/PB14), A = CH3/CH3N (PA10/PB15). The MCU dead-time generator therefore acts within each half-bridge. AFs match DS13122 (AF6, PB15 AF4).
+  - **MCU:** PWM mode 1, CCxP = CCxNP = 0 (active high), DTG = 17 (100 ns), CCR preload on (OCxPE, set by `HAL_TIM_PWM_ConfigChannel`). Duty clamped to 0–0.93.
+  - **Off states:** MOE = 0 with OSSI = 1 and OISx = OISxN = 0 drives both outputs of every phase low, for idle, break and debugger halt (RM0440 TIM1 debug mode: outputs disabled as if MOE were reset).
+  - **DRV8323 (independent of the MCU):** 6x PWM mode (0x02 PWM\_MODE = 00b). Table 8-2: INHx = INLx = 1 gives GHx = GLx = L, so a firmware error that drives both inputs high turns both gates off. TDRIVE adds VGS-handshake dead time (8.3.1.4.2) plus DEAD\_TIME = 01b (100 ns, register 0x05).
+  - **Stage 5:** the DRV is asleep, so the gates are held low whatever TIM1 does, and `motor_can_arm()` refuses if ENABLE is high.
+- **Bug fixed in `pwm.c` (break interrupt):** BIF can't be cleared while the break input is active (RM0440 TIMx\_SR, BIF). With BIE always on, a latched DRV fault holding nFAULT low would re-enter the priority-0 break interrupt forever, starving the main loop, so nothing would be logged and the DRV wouldn't be put to sleep. The outputs are off in hardware, so this isn't a shoot-through risk, but the board would hang silently. Also, from Stage 6 the DRV's normal wake and sleep nFAULT pulses would have latched FAULT\_PWM\_BREAK on every SW1 cycle. Fix: BIE is enabled in `motor_can_arm()` (together with MOE, with interrupts briefly disabled) and turned off in `motor_disarm()` and in the break callback. Break events are now reported only while armed; while disarmed the outputs are already off and the nFAULT EXTI covers DRV faults. Stage 5 behaviour is unchanged for the software-break test, which is done while armed.
+- **Open, for the developer's decision (not implemented):**
+  - `NMI_Handler` (generated) loops without clearing MOE. NMI sources here are flash double-ECC and SRAM parity (CSS isn't enabled).
+  - SYSCFG\_CFGR2 CLL, ECCL and SPL aren't set. Setting them connects core lockup, flash double-ECC and SRAM parity to the TIM1 system break (RM0440 Table 271), so those failures turn the outputs off in hardware.
+  - TIM1 break filter BKF = 0: any glitch on nFAULT trips the break. This fails safe, but could cause nuisance trips from Stage 6.

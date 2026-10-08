@@ -87,9 +87,13 @@ bool pwm_init(const char **what)
   TIM1->EGR = TIM_EGR_UG;           /* load the preloaded CCRs */
 
   /* Break flag from any earlier nFAULT pulse (wake/sleep in Stages 3-4)
-   * cleared, then the break interrupt enabled to latch break events. */
+   * cleared. The break interrupt stays off while disarmed: motor_can_arm()
+   * enables it, motor_disarm() and the break callback turn it off. BIF can't
+   * be cleared while the break input is active (RM0440 TIMx_SR BIF), so a
+   * held-low nFAULT with BIE = 1 would re-enter the interrupt forever, and
+   * the DRV's wake/sleep nFAULT pulses would latch faults while disarmed. */
   TIM1->SR = ~TIM_SR_BIF;
-  TIM1->DIER |= TIM_DIER_BIE;
+  TIM1->DIER &= ~TIM_DIER_BIE;
 
   TIM1->CR1 |= TIM_CR1_CEN;         /* counter runs; outputs stay off (MOE = 0) */
 
@@ -127,8 +131,12 @@ bool motor_can_arm(const char **reason)
   if (!drv8323_is_configured())                                 { *reason = "DRV not configured"; return false; }
 #endif
 
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
   TIM1->SR = ~TIM_SR_BIF;           /* break flag cleared before arming */
+  TIM1->DIER |= TIM_DIER_BIE;       /* break events latched while armed */
   TIM1->BDTR |= TIM_BDTR_MOE;
+  __set_PRIMASK(primask);
   if (!pwm_is_armed())
   {
     *reason = "MOE did not set";
@@ -142,6 +150,7 @@ void motor_disarm(void)
 {
   TIM1->BDTR &= ~TIM_BDTR_MOE;
   BOARD_DRV_ENABLE_PORT->BRR = BOARD_DRV_ENABLE_PIN;
+  TIM1->DIER &= ~TIM_DIER_BIE;      /* no break interrupts while disarmed */
 }
 
 bool pwm_is_armed(void)
@@ -185,11 +194,13 @@ uint32_t pwm_break_events(void)
 
 /* TIM1 break interrupt (HAL_TIM_IRQHandler from TIM1_BRK_TIM15_IRQHandler
  * clears BIF and calls this). Outputs are already off in hardware; latch
- * only (plan: TIM1 break interrupt, "Must not re-arm anything"). */
+ * only (plan: TIM1 break interrupt, "Must not re-arm anything"). BIE off,
+ * so a break input that stays active can't re-enter this interrupt. */
 void HAL_TIMEx_BreakCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM1)
   {
+    TIM1->DIER &= ~TIM_DIER_BIE;
     s_break_events++;
     s_break_event = true;
   }
