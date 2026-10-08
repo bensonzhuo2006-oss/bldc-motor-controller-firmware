@@ -10,6 +10,7 @@
  * side is on (plan: Sampling).
  */
 #include "cursense.h"
+#include "ctrl.h"
 #include "debug.h"
 #include "pwm.h"
 #include "adc.h"
@@ -67,6 +68,7 @@ static volatile uint32_t    s_off_sum[PHASE_COUNT];
 static volatile uint16_t s_min[PHASE_COUNT];
 static volatile uint16_t s_max[PHASE_COUNT];
 static volatile uint32_t s_sum[PHASE_COUNT];
+static volatile uint64_t s_sumsq[PHASE_COUNT];   /* of (count - 2048), keeps the variance precise */
 static volatile uint32_t s_n;
 
 static volatile uint32_t s_isr_max;
@@ -85,8 +87,17 @@ static void cursense_stats_reset(void)
     s_min[ph] = 0xFFFFU;
     s_max[ph] = 0U;
     s_sum[ph] = 0U;
+    s_sumsq[ph] = 0U;
   }
   s_n = 0U;
+}
+
+/* Square root on the FPU (VSQRT.F32), without pulling in libm. */
+static inline float cursense_sqrtf(float x)
+{
+  float r;
+  __asm volatile("vsqrt.f32 %0, %1" : "=t"(r) : "t"(x));
+  return r;
 }
 
 static bool cursense_adc_enable(ADC_HandleTypeDef *h)
@@ -243,6 +254,15 @@ void cursense_stats_take(cursense_stats_t *out)
     out->min[ph] = s_min[ph];
     out->max[ph] = s_max[ph];
     out->mean[ph] = (s_n > 0U) ? ((float)s_sum[ph] / (float)s_n) : 0.0f;
+    out->rms[ph] = 0.0f;
+    if (s_n > 0U)
+    {
+      /* Variance about the mean from sums of (count - 2048): both terms stay
+       * small, so there's no cancellation. Double, once per call. */
+      double m = (double)out->mean[ph] - (double)CURSENSE_OFFSET_NOMINAL;
+      double var = ((double)s_sumsq[ph] / (double)s_n) - (m * m);
+      out->rms[ph] = (var > 0.0) ? cursense_sqrtf((float)var) : 0.0f;
+    }
   }
   cursense_stats_reset();
   __set_PRIMASK(primask);
@@ -290,14 +310,18 @@ void ADC1_2_IRQHandler(void)
   ADC2->ISR = CURSENSE_JFLAGS;
   ADC3->ISR = CURSENSE_JFLAGS;
 
+  float amps[PHASE_COUNT];
   for (uint32_t ph = 0U; ph < PHASE_COUNT; ph++)
   {
     uint16_t v = r[ph];
     s_raw[ph] = v;
-    s_amps[ph] = ((float)v - s_offset[ph]) * CURSENSE_AMPS_PER_COUNT;
+    amps[ph] = ((float)v - s_offset[ph]) * CURSENSE_AMPS_PER_COUNT;
+    s_amps[ph] = amps[ph];
     if (v < s_min[ph]) { s_min[ph] = v; }
     if (v > s_max[ph]) { s_max[ph] = v; }
     s_sum[ph] += v;
+    int32_t d = (int32_t)v - (int32_t)CURSENSE_OFFSET_NOMINAL;
+    s_sumsq[ph] += (uint64_t)(uint32_t)(d * d);
   }
   s_n++;
 
@@ -326,7 +350,7 @@ void ADC1_2_IRQHandler(void)
   s_count++;
   debug_scope_write(r[PHASE_A]);      /* PA2: SOA as the ADC sees it */
   debug_capture_push(r[PHASE_A], r[PHASE_B], r[PHASE_C]);
-  pwm_isr_update();
+  ctrl_isr(amps);                     /* overcurrent trip, then the PWM output */
 
   debug_timing_low();
   uint32_t dt = DWT->CYCCNT - t0;

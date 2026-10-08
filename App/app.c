@@ -872,14 +872,23 @@ static void ctrl_tick(uint32_t now_ms)
       ma[ph] = (int32_t)((st.mean[ph] - off[ph]) * CURSENSE_AMPS_PER_COUNT * AMPS_TO_MA);
     }
     uint32_t isr = cursense_isr_max_cycles();
-    debug_log("CUR mA=%ld/%ld/%ld pp=%u/%u/%u off=%u/%u/%u valid=%u n=%lu isr=%lu.%luus load=%lu%% late=%lu",
+    uint32_t load_pm = (isr * 1000UL) / CTRL_PERIOD_CYCLES;   /* permille */
+    uint32_t rms10[PHASE_COUNT];
+    for (uint32_t ph = 0U; ph < PHASE_COUNT; ph++)
+    {
+      rms10[ph] = (uint32_t)(st.rms[ph] * 10.0f + 0.5f);       /* tenths of a count */
+    }
+    debug_log("CUR mA=%ld/%ld/%ld pp=%u/%u/%u rms=%lu.%lu/%lu.%lu/%lu.%lu off=%u/%u/%u valid=%u n=%lu",
               (long)ma[PHASE_A], (long)ma[PHASE_B], (long)ma[PHASE_C],
               (unsigned)(st.max[PHASE_A] - st.min[PHASE_A]), (unsigned)(st.max[PHASE_B] - st.min[PHASE_B]),
               (unsigned)(st.max[PHASE_C] - st.min[PHASE_C]),
+              rms10[PHASE_A] / 10UL, rms10[PHASE_A] % 10UL, rms10[PHASE_B] / 10UL, rms10[PHASE_B] % 10UL,
+              rms10[PHASE_C] / 10UL, rms10[PHASE_C] % 10UL,
               (unsigned)(off[PHASE_A] + 0.5f), (unsigned)(off[PHASE_B] + 0.5f), (unsigned)(off[PHASE_C] + 0.5f),
-              cursense_offsets_valid() ? 1U : 0U, st.samples,
+              cursense_offsets_valid() ? 1U : 0U, st.samples);
+    debug_log("CTRL isr_max=%lu.%luus load=%lu.%lu%% late=%lu",
               isr / DEBUG_CYCLES_PER_US, (isr % DEBUG_CYCLES_PER_US) * 10UL / DEBUG_CYCLES_PER_US,
-              (isr * 100UL) / CTRL_PERIOD_CYCLES, cursense_late_count());
+              load_pm / 10UL, load_pm % 10UL, cursense_late_count());
   }
 #else
   (void)now_ms;

@@ -109,6 +109,19 @@ bool debug_capture_done(void)
   return s_cap_state == CAP_DONE;
 }
 
+bool debug_capture_get(uint32_t n, uint16_t out[3])
+{
+  if ((s_cap_state != CAP_DONE) || (n >= DEBUG_CAP_SAMPLES))
+  {
+    return false;
+  }
+  uint32_t i = (s_cap_idx + n) & DEBUG_CAP_MASK;   /* s_cap_idx = oldest once done */
+  out[0] = s_cap[i][0];
+  out[1] = s_cap[i][1];
+  out[2] = s_cap[i][2];
+  return true;
+}
+
 bool debug_capture_dump_start(void)
 {
   if ((s_cap_state != CAP_DONE) || (s_cap_dump_left != 0U))

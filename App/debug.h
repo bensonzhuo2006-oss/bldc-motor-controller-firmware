@@ -36,6 +36,12 @@ void debug_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void debug_capture_push(uint16_t a, uint16_t b, uint16_t c);
 void debug_capture_trigger(void);
 bool debug_capture_done(void);
+/** Sample n of a finished capture, oldest first. A trigger from the control
+ *  interrupt lands after that interrupt's sample (n = 511); n = 512 is the
+ *  first sample after it. */
+bool debug_capture_get(uint32_t n, uint16_t out[3]);
+#define DEBUG_CAPTURE_LEN      1024U
+#define DEBUG_CAPTURE_TRIGGER  512U
 bool debug_capture_dump_start(void);
 bool debug_capture_dump_tick(void);
 

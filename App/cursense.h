@@ -39,6 +39,7 @@ typedef struct
   uint16_t min[PHASE_COUNT];
   uint16_t max[PHASE_COUNT];
   float    mean[PHASE_COUNT];    /* counts */
+  float    rms[PHASE_COUNT];     /* standard deviation about the mean, counts */
   uint32_t samples;
 } cursense_stats_t;
 
