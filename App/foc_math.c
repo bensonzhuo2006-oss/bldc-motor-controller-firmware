@@ -3,6 +3,7 @@
  * @brief   CORDIC sine/cosine and space-vector PWM.
  */
 #include "foc_math.h"
+#include "app_config.h"
 #include "pwm.h"
 #include "main.h"
 #include <stdint.h>
@@ -31,16 +32,6 @@
                            (FOC_CORDIC_PRECISION << CORDIC_CSR_PRECISION_Pos) | \
                            CORDIC_CSR_NRES)
 
-/* ---- Helpers -------------------------------------------------------------- */
-
-/* Square root on the FPU (VSQRT.F32), without pulling in libm. */
-static inline float foc_sqrtf(float x)
-{
-  float r;
-  __asm volatile("vsqrt.f32 %0, %1" : "=t"(r) : "t"(x));
-  return r;
-}
-
 /* ---- API ------------------------------------------------------------------ */
 
 bool foc_init(void)
@@ -53,7 +44,7 @@ bool foc_init(void)
   return true;
 }
 
-void foc_sincos(float theta, float *s, float *c)
+APP_RAMFUNC void foc_sincos(float theta, float *s, float *c)
 {
   /* Angle / pi, wrapped to [-1, 1) for ARG1. floor() by hand (no libm). */
   float x = theta * FOC_INV_PI;
@@ -74,7 +65,7 @@ void foc_sincos(float theta, float *s, float *c)
   *s = (float)(int32_t)CORDIC->RDATA * FOC_INV_Q31;
 }
 
-void foc_svpwm(float v_alpha, float v_beta, float vbus, float vph[3], float duty[3])
+APP_RAMFUNC void foc_svpwm(float v_alpha, float v_beta, float vbus, float vph[3], float duty[3])
 {
   if (!(vbus > FOC_VBUS_MIN_V))
   {

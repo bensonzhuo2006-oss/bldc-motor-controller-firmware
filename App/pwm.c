@@ -15,6 +15,9 @@
 #if BRINGUP_STAGE >= 7
 #include "cursense.h"
 #endif
+#if BRINGUP_STAGE >= 9
+#include "mt6701.h"
+#endif
 
 /* ---- Constants ------------------------------------------------------------ */
 
@@ -192,6 +195,13 @@ bool motor_can_arm(const char **reason)
   if (!cursense_offsets_valid())                                { *reason = "current offsets not valid"; return false; }
   if (!cursense_heartbeat_ok(HAL_GetTick()))                    { *reason = "control interrupt not running"; return false; }
 #endif
+#if BRINGUP_STAGE >= 9
+  /* Plan arming rules: encoder healthy from Stage 9 (good CRC, normal
+   * field, no loss of track on the latest read). */
+  mt6701_snapshot_t enc;
+  mt6701_snapshot(&enc);
+  if (!enc.healthy)                                             { *reason = "encoder not healthy"; return false; }
+#endif
 
   uint32_t primask = __get_PRIMASK();
   __disable_irq();
@@ -227,12 +237,12 @@ void motor_disarm(void)
   TIM1->DIER &= ~TIM_DIER_BIE;      /* no break interrupts while disarmed */
 }
 
-bool pwm_is_armed(void)
+APP_RAMFUNC bool pwm_is_armed(void)
 {
   return (TIM1->BDTR & TIM_BDTR_MOE) != 0U;
 }
 
-void pwm_set_duty(float a, float b, float c)
+APP_RAMFUNC void pwm_set_duty(float a, float b, float c)
 {
   BOARD_CCR_PHASE_A = pwm_duty_to_ccr(a);
   BOARD_CCR_PHASE_B = pwm_duty_to_ccr(b);
@@ -289,7 +299,7 @@ void pwm_command_duty(float a, float b, float c)
   __set_PRIMASK(primask);
 }
 
-void pwm_isr_update(void)
+APP_RAMFUNC void pwm_isr_update(void)
 {
   if (pwm_is_armed())
   {

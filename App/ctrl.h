@@ -36,6 +36,14 @@ void ctrl_set_vector(float v, float theta, float shift);
  *  that same interrupt, so the capture's trigger marks the step. */
 void ctrl_vector_step(float v_step);
 
+/** Stage 9 forced angle. reset: angle, speed and cycle count to 0 (call
+ *  while disarmed). set_spin: target electrical frequency (Hz, sign =
+ *  direction) and the slew toward it (Hz/s). spin_state: present speed and
+ *  electrical cycles since the reset (fractional). Main loop. */
+void ctrl_spin_reset(void);
+void ctrl_set_spin(float f_target_hz, float accel_hz_s);
+void ctrl_spin_state(float *f_now_hz, float *cycles);
+
 /** Phase voltages last commanded (V, before injection) and the highest
  *  duty, for logging. */
 void ctrl_last_output(float vph[PHASE_COUNT], float *duty_max);

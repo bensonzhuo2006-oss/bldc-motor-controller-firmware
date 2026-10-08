@@ -28,9 +28,19 @@ static volatile float    s_step_v;
 static volatile float    s_vph[PHASE_COUNT];
 static volatile float    s_dmax;
 
+/* Stage 9 forced angle: target and slew set by the main loop; speed, angle
+ * and whole electrical cycles kept by the interrupt. */
+#define CTRL_DT_S          50e-6f            /* control period, 20 kHz (plan: TIM1) */
+#define CTRL_TWO_PI        6.28318530718f
+static volatile float    s_f_target;       /* Hz electrical, signed */
+static volatile float    s_accel;          /* Hz/s */
+static volatile float    s_f_now;
+static volatile float    s_theta_f;        /* rad, [0, 2 pi) */
+static volatile int32_t  s_ecycles;
+
 /* ---- Control interrupt ---------------------------------------------------- */
 
-void ctrl_isr(const float amps[PHASE_COUNT])
+APP_RAMFUNC void ctrl_isr(const float amps[PHASE_COUNT])
 {
   if (!pwm_is_armed())
   {
@@ -63,16 +73,51 @@ void ctrl_isr(const float amps[PHASE_COUNT])
     debug_capture_trigger();   /* this sample is the capture's trigger point */
   }
 
-  /* Fixed vector at theta: V_alpha = v cos(theta), V_beta = v sin(theta)
-   * (inverse Park with Vd = v, Vq = 0), then SVPWM. */
+  float theta;
+#if BRINGUP_STAGE >= 9
+  /* Forced angle (plan Stage 9): the speed slews toward the target at the
+   * set acceleration and the angle integrates it. */
+  float df = s_f_target - s_f_now;
+  float dmax_f = s_accel * CTRL_DT_S;
+  if (df > dmax_f)
+  {
+    df = dmax_f;
+  }
+  else if (df < -dmax_f)
+  {
+    df = -dmax_f;
+  }
+  s_f_now += df;
+  float th = s_theta_f + (CTRL_TWO_PI * s_f_now * CTRL_DT_S);
+  if (th >= CTRL_TWO_PI)
+  {
+    th -= CTRL_TWO_PI;
+    s_ecycles++;
+  }
+  else if (th < 0.0f)
+  {
+    th += CTRL_TWO_PI;
+    s_ecycles--;
+  }
+  s_theta_f = th;
+  theta = th;
+#else
+  theta = s_theta;
+#endif
+
+  /* Vector of amplitude v along theta: inverse Park with Vd = v, Vq = 0,
+   * then SVPWM. */
   float sn;
   float cs;
+  float va;
+  float vb;
   float vph[PHASE_COUNT];
   float d[PHASE_COUNT];
   float v = s_v;
   float sh = s_shift;
-  foc_sincos(s_theta, &sn, &cs);
-  foc_svpwm(v * cs, v * sn, MOTOR_VBUS_V, vph, d);
+  foc_sincos(theta, &sn, &cs);
+  foc_inv_park(v, 0.0f, sn, cs, &va, &vb);
+  foc_svpwm(va, vb, MOTOR_VBUS_V, vph, d);
 
   float dmax = 0.0f;
   for (uint32_t ph = 0U; ph < PHASE_COUNT; ph++)
@@ -141,6 +186,35 @@ void ctrl_vector_step(float v_step)
   __disable_irq();
   s_step_v = v_step;
   s_step_pending = true;
+  __set_PRIMASK(primask);
+}
+
+void ctrl_spin_reset(void)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  s_f_target = 0.0f;
+  s_f_now = 0.0f;
+  s_theta_f = 0.0f;
+  s_ecycles = 0;
+  __set_PRIMASK(primask);
+}
+
+void ctrl_set_spin(float f_target_hz, float accel_hz_s)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  s_f_target = f_target_hz;
+  s_accel = accel_hz_s;
+  __set_PRIMASK(primask);
+}
+
+void ctrl_spin_state(float *f_now_hz, float *cycles)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  *f_now_hz = s_f_now;
+  *cycles = (float)s_ecycles + (s_theta_f / CTRL_TWO_PI);
   __set_PRIMASK(primask);
 }
 

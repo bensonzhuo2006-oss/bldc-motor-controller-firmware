@@ -10,6 +10,7 @@
  * side is on (plan: Sampling).
  */
 #include "cursense.h"
+#include "app_config.h"
 #include "ctrl.h"
 #include "debug.h"
 #include "pwm.h"
@@ -289,7 +290,7 @@ uint32_t cursense_late_count(void)
 /* Replaces the CubeMX handler ("Generate IRQ handler" unticked for ADC1 and
  * ADC2 global interrupt). Register access only: no HAL, no logging, no
  * blocking, no SPI3 (plan: Timing, interrupts and data sharing). */
-void ADC1_2_IRQHandler(void)
+APP_RAMFUNC void ADC1_2_IRQHandler(void)
 {
   if ((ADC1->ISR & ADC_ISR_JEOS) == 0U)
   {

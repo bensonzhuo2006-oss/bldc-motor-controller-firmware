@@ -17,10 +17,11 @@
  * 4.4 Ohm fits the 4.8 Ohm spec being line-to-line instead. */
 #define MOTOR_R_PHASE_OHM      2.2f
 
-/* TODO_MEASURED (Stage 8 step 7): if the 2.6 mH spec is line-to-line like
- * the resistance, the wye-equivalent is 1.3 mH (0.87 mH if it was per delta
- * winding). */
-#define MOTOR_L_PHASE_H        1.3e-3f
+/* Stage 8, 2026-10-08: three L steps 0.5 -> 1.0 V at 0 deg (tau from the
+ * 63.2 % crossing, 50 us samples, L = tau x R): 525, 611, 483 uH, mean
+ * 540 uH, spread +/-12 % (tau spans about 5 samples). V/I 2.24-2.27 Ohm,
+ * agreeing with R. Lower than the spec's 2.6 mH suggested (0.87-1.3 mH). */
+#define MOTOR_L_PHASE_H        0.54e-3f
 
 /* Back-EMF constant, datasheet (plan: Motor table). */
 #define MOTOR_KE_V_PER_RAD_S   0.1562f

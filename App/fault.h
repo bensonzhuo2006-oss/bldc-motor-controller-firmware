@@ -30,6 +30,7 @@ typedef enum
   FAULT_CTRL_HEARTBEAT,      /* control interrupt count stopped (Stage 7) */
   FAULT_CUR_OFFSET,          /* current-sense offset out of range (Stage 7) */
   FAULT_OVERCURRENT,         /* software trip in the control interrupt (Stage 8) */
+  FAULT_ENCODER,             /* encoder unhealthy or a read error while armed (Stage 9) */
   FAULT_COUNT
 } fault_code_t;
 

@@ -19,6 +19,22 @@ bool foc_init(void);
 /** sin and cos of theta (rad, any value; wrapped to [-pi, pi)). */
 void foc_sincos(float theta, float *s, float *c);
 
+/** Square root on the FPU (VSQRT.F32), without libm. */
+static inline float foc_sqrtf(float x)
+{
+  float r;
+  __asm volatile("vsqrt.f32 %0, %1" : "=t"(r) : "t"(x));
+  return r;
+}
+
+/** Inverse Park (plan: Transforms): V_alpha = Vd cos - Vq sin,
+ *  V_beta = Vd sin + Vq cos, with s, c = sin, cos of theta_e. */
+static inline void foc_inv_park(float vd, float vq, float s, float c, float *v_alpha, float *v_beta)
+{
+  *v_alpha = (vd * c) - (vq * s);
+  *v_beta = (vd * s) + (vq * c);
+}
+
 /** Space-vector PWM: limit |V| to 0.497 x vbus, inverse Clarke, midpoint
  *  injection, duty = 0.5 + v / vbus clamped to [0, 0.93]. vph receives the
  *  phase voltages before injection (V), duty the three duties. */

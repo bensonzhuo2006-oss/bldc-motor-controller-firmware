@@ -31,6 +31,7 @@
 #endif
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifndef BRINGUP_STAGE
 #error "BRINGUP_STAGE must be defined in app_config.h"
@@ -39,6 +40,9 @@
 /* Stages 5-7 drive the PWM from debugger-set test duties; from Stage 8 the
  * control interrupt takes over. */
 #define APP_TEST_MODE   ((BRINGUP_STAGE >= 5) && (BRINGUP_STAGE <= 7))
+
+/* Stages 8-9 drive a voltage vector (fixed angle, then forced spin). */
+#define APP_VEC_MODE    ((BRINGUP_STAGE >= 8) && (BRINGUP_STAGE <= 9))
 
 /* Main-loop tick: 1 kHz (plan: Timing, interrupts and data sharing). */
 #define APP_TICK_S             0.001f
@@ -192,14 +196,19 @@ volatile uint32_t g_drv_idrive = DRV_CFG_IDRIVE;
 volatile uint32_t g_phase_off;
 #endif
 
-#if BRINGUP_STAGE == 8
-/* Stage 8 test mode: a fixed voltage vector into the motor at rest (plan
- * Stage 8). Set from the debugger: amplitude g_vec_v (phase-voltage
- * amplitude, V), angle g_vec_deg (electrical), common-mode duty shift
- * g_duty_shift (step 7: shift until the highest duty reaches the 93 % cap),
- * overcurrent trip g_oc_trip (1.0 A until the meter check, then 1.5 A). */
+#if APP_VEC_MODE
+/* Stages 8-9 test mode: a voltage vector into the motor. Stage 8: fixed
+ * angle (plan Stage 8). Stage 9: forced angle at a ramped speed, open loop
+ * (plan Stage 9). Set from the debugger: amplitude g_vec_v (phase-voltage
+ * amplitude, V), common-mode duty shift g_duty_shift (Stage 8 step 7),
+ * overcurrent trip g_oc_trip (1.0 A until the meter check, then 1.5 A);
+ * Stage 8: angle g_vec_deg, step g_vstep_v; Stage 9: g_spin_hz, g_spin_accel. */
 #define APP_CMD_LSTEP        8U       /* inductance step, g_vec_v -> g_vstep_v */
-#define VEC_V_INIT           0.5f     /* procedure step 2 */
+#if BRINGUP_STAGE == 8
+#define VEC_V_INIT           0.5f     /* Stage 8 procedure step 2 */
+#else
+#define VEC_V_INIT           1.0f     /* Stage 9 procedure step 1: about 1 V */
+#endif
 #define VEC_V_MAX            1.2f     /* covers the 1.0 V step; 1.2 V / 2.2 Ohm = 0.55 A, under the 1 A trip */
 #define VEC_SLEW_V_PER_MS    0.001f   /* 1 V/s: every arm starts at 0 V and ramps */
 #define VEC_SHIFT_MAX        0.43f    /* 0.5 + 0.43 = 0.93: largest useful shift */
@@ -213,13 +222,37 @@ volatile uint32_t g_phase_off;
 #define LFIT_AVG_SAMPLES     100U
 #define LFIT_STEP_AT         511.5f
 #define LFIT_TAU_FRACTION    0.632121f
+/* After re-arming the capture, wait for 200 fresh samples (10 ms) so the
+ * 100-sample pre-step average contains no old data. */
+#define LSTEP_PRETRIGGER_MS  10U
 #define CTRL_SAMPLE_S        50e-6f   /* control interrupt period */
+/* Rotor-motion check (procedure step 6): encoder position read this long
+ * after an angle change, once the rotor has settled. 120 deg electrical =
+ * 120 / 11 = 10.9 deg mechanical = 496 counts (16384 counts per turn). */
+#define VEC_MOVE_SETTLE_MS   300U
+#define VEC_ARM_SETTLE_MS    800U     /* 0.5 V ramp at 1 V/s, then settle */
+#define ENC_COUNTS_PER_TURN  16384L
+#define ENC_COUNTS_TO_MDEG   (360000.0f / 16384.0f)   /* millidegrees per count */
+
+/* Stage 9 forced spin (plan Stage 9 step 1: about 1 V, ramp 0 to 5 Hz
+ * electrical). The limit keeps open loop in sync: at 10 Hz electrical the
+ * back-EMF is 0.1562 x 2 pi x 10 / 11 = 0.89 V, close to the 1 V applied.
+ * The rotor is held at 0 deg for SPIN_ALIGN_MS after arming (ramp, then
+ * settle) before the angle starts to move. */
+#define SPIN_HZ_INIT         5.0f
+#define SPIN_HZ_MAX          10.0f
+#define SPIN_ACCEL_INIT      2.5f     /* Hz/s: 0 to 5 Hz in 2 s */
+#define SPIN_ACCEL_MAX       10.0f
+#define SPIN_ALIGN_MS        1500U
+#define SPIN_MIN_CYCLES_LOG  0.5f     /* electrical cycles per log period to compute counts/cycle */
 
 volatile float g_vec_v = VEC_V_INIT;
 volatile float g_vec_deg = 0.0f;
 volatile float g_duty_shift = 0.0f;
 volatile float g_oc_trip = MOTOR_OC_TRIP_DEFAULT_A;
-volatile float g_vstep_v = 1.0f;      /* procedure step 7 */
+volatile float g_vstep_v = 1.0f;      /* Stage 8 procedure step 7 */
+volatile float g_spin_hz = SPIN_HZ_INIT;      /* Stage 9: electrical Hz, sign = direction */
+volatile float g_spin_accel = SPIN_ACCEL_INIT;
 #endif
 
 static uint32_t s_last_tick_ms;
@@ -231,10 +264,23 @@ static float s_duty[PHASE_COUNT];   /* applied duties */
 #if BRINGUP_STAGE >= 8
 static float s_trip_applied;        /* overcurrent trip in force, A */
 #endif
-#if BRINGUP_STAGE == 8
+#if APP_VEC_MODE
 static bool  s_foc_ok;
 static float s_vec_v;               /* applied amplitude, slewed */
+static uint32_t s_align_ms;         /* Stage 9: ms left holding at 0 deg after arming */
+static int32_t s_spin_pos0;         /* Stage 9: encoder position at the last log */
+static float s_spin_cyc0;           /* Stage 9: electrical cycles at the last log */
 static bool  s_lstep_active;        /* waiting for the step's capture */
+#if BRINGUP_STAGE == 8
+static uint32_t s_lstep_wait;       /* ms until the step is applied; 0 = none */
+static float s_lstep_v1;            /* step target, V */
+static float s_move_deg;            /* angle at the last change */
+static int32_t s_move_from;         /* encoder position (counts) at the change */
+static float s_move_from_deg;       /* angle before the change (< 0: the arm) */
+static uint32_t s_move_ms;          /* ms since the change */
+static uint32_t s_move_wait;        /* ms to wait before reading */
+static bool  s_move_pending;
+#endif
 #endif
 #if APP_BRIDGE_TOOLS
 static uint32_t s_sweep_step;
@@ -386,6 +432,34 @@ static void enc_tick(mt6701_snapshot_t *s)
   if (s->counters.reads > (s->counters.spi_timeouts + s->counters.crc_errors))
   {
     enc_log_status_change(s);
+  }
+}
+#endif
+
+#if BRINGUP_STAGE >= 9
+/* Encoder faults disarm from Stage 9 (plan: Firmware protection, Encoder
+ * faults): a CRC error, SPI timeout or impossible jump since the last read,
+ * or an unhealthy status (field too weak or strong, loss of track), while
+ * armed, latches FAULT_ENCODER; the fault response disarms (motor coasts).
+ * ctx1 = new CRC | timeouts << 8 | jumps << 16 (low 8 bits each),
+ * ctx2 = status bits | healthy << 8. */
+static void enc_monitor(const mt6701_snapshot_t *s)
+{
+  static uint32_t crc;
+  static uint32_t to;
+  static uint32_t jump;
+  uint32_t d_crc = s->counters.crc_errors - crc;
+  uint32_t d_to = s->counters.spi_timeouts - to;
+  uint32_t d_jump = s->counters.angle_jumps - jump;
+  crc = s->counters.crc_errors;
+  to = s->counters.spi_timeouts;
+  jump = s->counters.angle_jumps;
+
+  if (pwm_is_armed() && ((d_crc | d_to | d_jump) != 0U || !s->healthy))
+  {
+    (void)fault_raise(FAULT_ENCODER,
+                      (d_crc & 0xFFU) | ((d_to & 0xFFU) << 8) | ((d_jump & 0xFFU) << 16),
+                      (uint32_t)s->status | (s->healthy ? 0x100U : 0U));
   }
 }
 #endif
@@ -956,9 +1030,9 @@ static void ctrl_tick(uint32_t now_ms)
 }
 #endif
 
-/* ---- Stage 8 test mode: fixed voltage vector ------------------------------- */
+/* ---- Stages 8-9 test mode: voltage vector (fixed angle, then forced spin) -- */
 
-#if BRINGUP_STAGE == 8
+#if APP_VEC_MODE
 static float vec_target(void)
 {
   float v = g_vec_v;
@@ -989,6 +1063,82 @@ static float vec_shift(void)
   return (s > VEC_SHIFT_MAX) ? VEC_SHIFT_MAX : s;
 }
 
+/* Multi-turn encoder position, counts. */
+static int32_t vec_enc_position(void)
+{
+  mt6701_snapshot_t s;
+  mt6701_snapshot(&s);
+  return ((int32_t)s.turns * ENC_COUNTS_PER_TURN) + (int32_t)s.angle_counts;
+}
+
+#if BRINGUP_STAGE == 8
+static void vec_move_start(float from_deg, uint32_t wait_ms)
+{
+  s_move_from = vec_enc_position();
+  s_move_from_deg = from_deg;
+  s_move_ms = 0U;
+  s_move_wait = wait_ms;
+  s_move_pending = true;
+}
+
+/* Log how far the shaft moved after an arm or an angle change (plan Stage 8
+ * step 6, "watch the rotor snap", measured by the encoder). */
+static void vec_move_tick(void)
+{
+  if (!s_move_pending || (++s_move_ms < s_move_wait))
+  {
+    return;
+  }
+  s_move_pending = false;
+  int32_t d = vec_enc_position() - s_move_from;
+  int32_t tenths = (int32_t)((float)d * ENC_COUNTS_TO_MDEG / 100.0f);   /* 0.1 deg mech */
+  int32_t mag = (tenths < 0) ? -tenths : tenths;
+  if (s_move_from_deg < 0.0f)
+  {
+    debug_log("MOVE arm -> %ld deg: shaft moved %ld counts = %c%ld.%ld deg mech (0 if already aligned)",
+              (long)s_move_deg, (long)d, (tenths < 0) ? '-' : '+', (long)(mag / 10), (long)(mag % 10));
+  }
+  else
+  {
+    debug_log("MOVE %ld -> %ld deg elec: shaft moved %ld counts = %c%ld.%ld deg mech (120 elec = 496 = 10.9 deg)",
+              (long)s_move_from_deg, (long)s_move_deg, (long)d, (tenths < 0) ? '-' : '+',
+              (long)(mag / 10), (long)(mag % 10));
+  }
+}
+#endif
+
+#if BRINGUP_STAGE >= 9
+/* Stage 9 spin target (Hz electrical, sign = direction) and slew, bounded. */
+static float spin_target(void)
+{
+  float f = g_spin_hz;
+  if (!(f >= -SPIN_HZ_MAX) || !(f <= SPIN_HZ_MAX))   /* NaN or beyond the limit */
+  {
+    return (f > 0.0f) ? SPIN_HZ_MAX : ((f < 0.0f) ? -SPIN_HZ_MAX : 0.0f);
+  }
+  return f;
+}
+
+static float spin_accel(void)
+{
+  float a = g_spin_accel;
+  if (!(a > 0.0f))
+  {
+    return SPIN_ACCEL_INIT;
+  }
+  return (a > SPIN_ACCEL_MAX) ? SPIN_ACCEL_MAX : a;
+}
+
+/* Signed value with two decimals, for the log. */
+static const char *fmt2(char *buf, size_t len, float x)
+{
+  int32_t v = (int32_t)((x * 100.0f) + ((x < 0.0f) ? -0.5f : 0.5f));
+  uint32_t m = (uint32_t)((v < 0) ? -v : v);
+  (void)snprintf(buf, len, "%c%lu.%02lu", (v < 0) ? '-' : '+', m / 100UL, m % 100UL);
+  return buf;
+}
+#endif
+
 static void vec_arm(void)
 {
   const char *reason;
@@ -999,17 +1149,34 @@ static void vec_arm(void)
   }
   s_vec_v = 0.0f;                                  /* zero voltage vector, then ramp */
   ctrl_set_vector(0.0f, vec_theta(), 0.0f);
+#if BRINGUP_STAGE >= 9
+  ctrl_spin_reset();                               /* forced angle at 0 deg, not moving */
+#endif
   pwm_zero_command();
   if (motor_can_arm(&reason))
   {
+#if BRINGUP_STAGE == 8
     debug_log("VEC armed from 0 V; ramping to %lu mV at %ld deg, trip %lu mA",
               (uint32_t)(vec_target() * 1000.0f), (long)g_vec_deg, (uint32_t)(s_trip_applied * 1000.0f));
+    s_move_deg = vec_theta() / DEG_TO_RAD;
+    vec_move_start(-1.0f, VEC_ARM_SETTLE_MS);
+#else
+    char b[16];
+    s_align_ms = SPIN_ALIGN_MS;
+    s_spin_pos0 = vec_enc_position();
+    s_spin_cyc0 = 0.0f;
+    debug_log("SPIN armed: %lu mV at 0 deg for %u ms (align), then to %s Hz at %lu mHz/s; trip %lu mA",
+              (uint32_t)(vec_target() * 1000.0f), SPIN_ALIGN_MS, fmt2(b, sizeof(b), spin_target()),
+              (uint32_t)(spin_accel() * 1000.0f), (uint32_t)(s_trip_applied * 1000.0f));
+#endif
   }
   else
   {
     debug_log("VEC arm refused: %s", reason);
   }
 }
+
+#if BRINGUP_STAGE == 8
 
 /* Plan Stage 8 step 7: tau from the phase A step response in the capture,
  * L = tau x R. Assumes the vector is at 0 deg (phase A carries the full
@@ -1064,6 +1231,7 @@ static void vec_lstep_fit(void)
             (long)(i0 * AMPS_TO_MA), (long)(i1 * AMPS_TO_MA), (uint32_t)(tau * 1e6f),
             (uint32_t)(l_h * 1e6f), (uint32_t)(MOTOR_R_PHASE_OHM * 1000.0f), (uint32_t)(r_dc * 1000.0f));
 }
+#endif
 
 static void vec_command(uint32_t cmd)
 {
@@ -1092,31 +1260,45 @@ static void vec_command(uint32_t cmd)
         debug_log("CAP dump refused: no finished capture (g_app_cmd = 6 first)");
       }
       break;
+#if BRINGUP_STAGE == 8
     case APP_CMD_LSTEP:
     {
       float v1 = g_vstep_v;
       float v0 = vec_target();
       float settle = s_vec_v - v0;
-      if (!pwm_is_armed() || (settle > VEC_SLEW_V_PER_MS) || (settle < -VEC_SLEW_V_PER_MS) ||
-          !(v1 > v0) || (v1 > VEC_V_MAX))
+      if (!pwm_is_armed())
       {
-        debug_log("LSTEP refused: arm, wait for the ramp, and set g_vstep_v above g_vec_v (max %lu mV)",
-                  (uint32_t)(VEC_V_MAX * 1000.0f));
-        break;
+        debug_log("LSTEP refused: not armed (g_app_cmd = 1 first)");
       }
-      if (debug_capture_done())
+      else if ((settle > VEC_SLEW_V_PER_MS) || (settle < -VEC_SLEW_V_PER_MS))
       {
-        debug_log("LSTEP refused: a finished capture is waiting; dump it (g_app_cmd = 7) first");
-        break;
+        debug_log("LSTEP refused: vector still ramping; wait 1 s");
       }
-      s_vec_v = v1;
-      g_vec_v = v1;            /* hold the new level after the step */
-      ctrl_vector_step(v1);    /* applied and captured in the same control interrupt */
-      s_lstep_active = true;
-      debug_log("LSTEP %lu -> %lu mV at %ld deg; fit follows in 25 ms", (uint32_t)(v0 * 1000.0f),
-                (uint32_t)(v1 * 1000.0f), (long)g_vec_deg);
+      else if (!(v1 > v0) || (v1 > VEC_V_MAX))
+      {
+        debug_log("LSTEP refused: g_vstep_v must be above g_vec_v (%lu mV) and at most %lu mV",
+                  (uint32_t)(v0 * 1000.0f), (uint32_t)(VEC_V_MAX * 1000.0f));
+      }
+      else if ((s_lstep_wait != 0U) || s_lstep_active)
+      {
+        debug_log("LSTEP refused: a step is already running");
+      }
+      else if (debug_capture_done() && !debug_capture_rearm())
+      {
+        debug_log("LSTEP refused: a capture dump is still printing; wait for CAP end");
+      }
+      else
+      {
+        /* Capture re-armed (any earlier recording discarded); step after
+         * enough fresh samples for the pre-step average. */
+        s_lstep_v1 = v1;
+        s_lstep_wait = LSTEP_PRETRIGGER_MS;
+        debug_log("LSTEP %lu -> %lu mV at %ld deg in %u ms; fit follows 25 ms later",
+                  (uint32_t)(v0 * 1000.0f), (uint32_t)(v1 * 1000.0f), (long)g_vec_deg, LSTEP_PRETRIGGER_MS);
+      }
       break;
     }
+#endif
     default:
       debug_log("CMD %lu unknown", cmd);
       break;
@@ -1141,6 +1323,16 @@ static void vec_tick(uint32_t now_ms)
     vec_command(cmd);
   }
 
+#if BRINGUP_STAGE == 8
+  if (pwm_is_armed() && (s_lstep_wait != 0U) && (--s_lstep_wait == 0U))
+  {
+    s_vec_v = s_lstep_v1;
+    g_vec_v = s_lstep_v1;          /* hold the new level after the step */
+    ctrl_vector_step(s_lstep_v1);  /* applied and captured in the same control interrupt */
+    s_lstep_active = true;
+  }
+#endif
+
   if (pwm_is_armed())
   {
     float target = vec_target();
@@ -1155,18 +1347,87 @@ static void vec_tick(uint32_t now_ms)
     }
     s_vec_v += step;
     ctrl_set_vector(s_vec_v, vec_theta(), vec_shift());
+
+#if BRINGUP_STAGE == 8
+    float deg = vec_theta() / DEG_TO_RAD;
+    if (deg != s_move_deg)
+    {
+      vec_move_start(s_move_deg, VEC_MOVE_SETTLE_MS);
+      s_move_deg = deg;
+    }
+    vec_move_tick();
+#else
+    /* Hold at 0 deg until aligned, then spin toward the target (the
+     * interrupt slews the speed at spin_accel()). */
+    float f_t = 0.0f;
+    if (s_align_ms > 0U)
+    {
+      s_align_ms--;
+    }
+    else
+    {
+      f_t = spin_target();
+    }
+    ctrl_set_spin(f_t, spin_accel());
+#endif
   }
   else
   {
     s_vec_v = 0.0f;
+#if BRINGUP_STAGE == 8
+    s_move_pending = false;
+    s_lstep_wait = 0U;              /* a disarm or trip cancels a pending step */
+#endif
   }
 
+#if BRINGUP_STAGE == 8
   if (s_lstep_active && debug_capture_done())
   {
     s_lstep_active = false;
     vec_lstep_fit();
   }
+#endif
 
+#if BRINGUP_STAGE >= 9
+  /* Encoder against the forced angle over the last second (plan Stage 9
+   * step 3): counts per electrical cycle = 16384 / pole pairs, signed by
+   * the direction; current amplitude from the latest sample (Clarke). */
+  if ((now_ms % VEC_LOG_PERIOD_MS) == 0U)
+  {
+    float f_now;
+    float cyc;
+    char b1[16];
+    char b2[16];
+    char b3[16];
+    mt6701_snapshot_t e;
+    cursense_snapshot_t cs;
+    ctrl_spin_state(&f_now, &cyc);
+    mt6701_snapshot(&e);
+    cursense_snapshot(&cs);
+    int32_t pos = vec_enc_position();
+    float dcyc = cyc - s_spin_cyc0;
+    int32_t dpos = pos - s_spin_pos0;
+    s_spin_cyc0 = cyc;
+    s_spin_pos0 = pos;
+
+    float cpc = 0.0f;
+    float pp = 0.0f;
+    if ((dcyc > SPIN_MIN_CYCLES_LOG) || (dcyc < -SPIN_MIN_CYCLES_LOG))
+    {
+      cpc = (float)dpos / dcyc;
+      float acpc = (cpc < 0.0f) ? -cpc : cpc;
+      pp = (acpc > 1.0f) ? ((float)ENC_COUNTS_PER_TURN / acpc) : 0.0f;
+    }
+    float i_alpha = cs.amps[PHASE_A];
+    float i_beta = (cs.amps[PHASE_B] - cs.amps[PHASE_C]) * 0.577350269f;   /* 1/sqrt(3) */
+    float i_amp = foc_sqrtf((i_alpha * i_alpha) + (i_beta * i_beta));
+    debug_log("SPIN armed=%u V=%lumV f=%sHz tgt=%s rpm forced=%ld meas=%ld cnt/ecyc=%ld pp=%s Iamp=%lumA fault=%s",
+              pwm_is_armed() ? 1U : 0U, (uint32_t)(s_vec_v * 1000.0f), fmt2(b1, sizeof(b1), f_now),
+              fmt2(b2, sizeof(b2), spin_target()),
+              (long)(f_now * 60.0f / (float)MOTOR_POLE_PAIRS), (long)(e.speed_rad_s * RAD_S_TO_RPM),
+              (long)cpc, fmt2(b3, sizeof(b3), pp), (uint32_t)(i_amp * AMPS_TO_MA), fault_name(fault_first()));
+  }
+#else
   if ((now_ms % VEC_LOG_PERIOD_MS) == 0U)
   {
     float vph[PHASE_COUNT];
@@ -1174,14 +1435,16 @@ static void vec_tick(uint32_t now_ms)
     ctrl_last_output(vph, &dmax);
     /* Expected currents from Ohm's law on the commanded phase voltages
      * (plan Stage 8 pass: V/R within about 15 %). */
-    debug_log("VEC armed=%u V=%lu mV deg=%ld shift=%lu dmax=%lu expect mA=%ld/%ld/%ld trip=%lu fault=%s",
+    debug_log("VEC armed=%u V=%lumV deg=%ld enc=%ld shift=%lu dmax=%lu expect mA=%ld/%ld/%ld trip=%lu fault=%s",
               pwm_is_armed() ? 1U : 0U, (uint32_t)(s_vec_v * 1000.0f), (long)g_vec_deg,
+              (long)vec_enc_position(),
               (uint32_t)(vec_shift() * 1000.0f), (uint32_t)(dmax * 1000.0f),
               (long)(vph[PHASE_A] / MOTOR_R_PHASE_OHM * AMPS_TO_MA),
               (long)(vph[PHASE_B] / MOTOR_R_PHASE_OHM * AMPS_TO_MA),
               (long)(vph[PHASE_C] / MOTOR_R_PHASE_OHM * AMPS_TO_MA),
               (uint32_t)(s_trip_applied * 1000.0f), fault_name(fault_first()));
   }
+#endif
 }
 #endif
 
@@ -1462,11 +1725,16 @@ void app_init(void)
   debug_log("STAGE%d targets g_duty_a/b/c (0..0.93), now A=%u B=%u C=%u permille", BRINGUP_STAGE,
             (unsigned)(g_duty_a * 1000.0f), (unsigned)(g_duty_b * 1000.0f), (unsigned)(g_duty_c * 1000.0f));
   debug_log("STAGE%d g_phase_off: 1 = A, 2 = B, 4 = C held off (both FETs) from the next arm", BRINGUP_STAGE);
-#elif BRINGUP_STAGE == 8
+#elif APP_VEC_MODE
   s_foc_ok = foc_init();
   debug_log("FOC cordic cos/sin q1.31 24 iterations %s", s_foc_ok ? "OK" : "FAIL (CubeMX: activate CORDIC)");
+#if BRINGUP_STAGE == 8
   debug_log("STAGE8 g_app_cmd: 1 arm, 2 disarm, 3 sw break, 6 capture, 7 dump, 8 L step");
   debug_log("STAGE8 g_vec_v (V, max 1.2) g_vec_deg g_duty_shift (max 0.43) g_oc_trip (A, 0.1-1.5) g_vstep_v");
+#else
+  debug_log("STAGE9 g_app_cmd: 1 arm (align, then spin), 2 disarm, 3 sw break, 6 capture, 7 dump");
+  debug_log("STAGE9 g_vec_v (V, max 1.2) g_spin_hz (elec Hz, +/-10, 0 = hold) g_spin_accel (Hz/s, max 10) g_oc_trip");
+#endif
 #endif
 
   s_last_tick_ms = HAL_GetTick();
@@ -1485,6 +1753,9 @@ void app_loop(void)
 #if BRINGUP_STAGE >= 1
     mt6701_snapshot_t enc;
     enc_tick(&enc);
+#endif
+#if BRINGUP_STAGE >= 9
+    enc_monitor(&enc);           /* encoder faults disarm from Stage 9 */
 #endif
 #if BRINGUP_STAGE >= 2
     power_tick(s_last_tick_ms);
@@ -1511,7 +1782,7 @@ void app_loop(void)
     stage4_tick(s_last_tick_ms);
 #elif APP_TEST_MODE
     test_tick(s_last_tick_ms);
-#elif BRINGUP_STAGE == 8
+#elif APP_VEC_MODE
     vec_tick(s_last_tick_ms);
 #endif
     uint32_t elapsed = debug_cycles() - start;

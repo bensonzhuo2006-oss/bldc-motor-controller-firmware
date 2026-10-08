@@ -36,6 +36,9 @@ void debug_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void debug_capture_push(uint16_t a, uint16_t b, uint16_t c);
 void debug_capture_trigger(void);
 bool debug_capture_done(void);
+/** Discard a finished capture and start recording again. Refused (false)
+ *  while a dump is printing. Main loop. */
+bool debug_capture_rearm(void);
 /** Sample n of a finished capture, oldest first. A trigger from the control
  *  interrupt lands after that interrupt's sample (n = 511); n = 512 is the
  *  first sample after it. */

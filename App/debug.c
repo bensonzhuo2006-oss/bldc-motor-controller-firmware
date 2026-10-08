@@ -3,6 +3,7 @@
  * @brief   SWO logging, cycle counter, scope output and HardFault dump.
  */
 #include "debug.h"
+#include "app_config.h"
 #include "dac.h"
 #include "opamp.h"
 #include <stdarg.h>
@@ -75,7 +76,7 @@ static volatile cap_state_t s_cap_state;
 static uint32_t s_cap_dump_left;   /* main loop only */
 static uint32_t s_cap_dump_i;
 
-void debug_capture_push(uint16_t a, uint16_t b, uint16_t c)
+APP_RAMFUNC void debug_capture_push(uint16_t a, uint16_t b, uint16_t c)
 {
   if (s_cap_state == CAP_DONE)
   {
@@ -107,6 +108,16 @@ void debug_capture_trigger(void)
 bool debug_capture_done(void)
 {
   return s_cap_state == CAP_DONE;
+}
+
+bool debug_capture_rearm(void)
+{
+  if (s_cap_dump_left != 0U)
+  {
+    return false;   /* a dump is still printing */
+  }
+  s_cap_state = CAP_RUN;
+  return true;
 }
 
 bool debug_capture_get(uint32_t n, uint16_t out[3])

@@ -75,6 +75,7 @@ const char *fault_name(fault_code_t code)
     case FAULT_CTRL_HEARTBEAT:      return "CTRL_HEARTBEAT";
     case FAULT_CUR_OFFSET:          return "CUR_OFFSET";
     case FAULT_OVERCURRENT:         return "OVERCURRENT";
+    case FAULT_ENCODER:             return "ENCODER";
     default:                        return "?";
   }
 }
