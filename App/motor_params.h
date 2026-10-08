@@ -23,6 +23,17 @@
  * agreeing with R. Lower than the spec's 2.6 mH suggested (0.87-1.3 mH). */
 #define MOTOR_L_PHASE_H        0.54e-3f
 
+/* Encoder direction (plan: Phase order, angles and direction:
+ * theta_e = wrap(DIR x 11 x theta_m - theta_offset)). Stage 9, 2026-10-08:
+ * open-loop spin at +/-5 and +8 Hz electrical, encoder counts per electrical
+ * cycle -1489 in both directions, so the count falls as the angle advances
+ * A -> B -> C: DIR = -1, with the motor leads in their present order on J13.
+ * Stage 10 confirms it. */
+#define MOTOR_ENC_DIR          (-1)
+
+/* TODO_MEASURED (Stage 10): electrical angle at encoder count 0. */
+#define MOTOR_ENC_OFFSET_RAD   0.0f
+
 /* Back-EMF constant, datasheet (plan: Motor table). */
 #define MOTOR_KE_V_PER_RAD_S   0.1562f
 

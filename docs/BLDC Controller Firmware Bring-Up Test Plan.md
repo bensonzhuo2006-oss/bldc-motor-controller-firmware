@@ -937,3 +937,19 @@ Dated record of findings, decisions and measured results, newest last. Each entr
 - **Test mode:** arm → V ramps to `g_vec_v` (default 1.0 V, procedure step 1) at 0° and holds 1.5 s to align, then the speed ramps to `g_spin_hz` (default 5 Hz electrical = 27 rpm) at `g_spin_accel` (default 2.5 Hz/s). Negative `g_spin_hz` reverses (step 2); 0 decelerates and holds. Limits: ±10 Hz (the back-EMF at 10 Hz is 0.89 V, close to the 1 V applied, so open loop would lose sync beyond it), 10 Hz/s, 1.2 V; trip stays 1.0 A (Stage 8 current check deferred).
 - **Encoder against forced angle (step 3), logged every second:** `SPIN armed= V= f= tgt= rpm forced= meas= cnt/ecyc= pp= Iamp= fault=`. cnt/ecyc = encoder counts per electrical cycle over the last second (expect ±1489.5 = 16384/11; the sign is the encoder direction relative to A→B→C, which Stage 10 needs). pp = 16384/|cnt/ecyc| (expect 11.0). Iamp = current amplitude from the latest sample (Clarke: Iα = Ia, Iβ = (Ib − Ic)/√3; plan pass: about 0.6 A).
 - **Encoder faults now disarm (plan: Encoder faults, Stage 9):** while armed, a new CRC error, SPI timeout or impossible jump, or an unhealthy status (field, loss of track), latches FAULT\_ENCODER; the fault response disarms. The encoder is still read in the main loop (1 kHz), so the response is within 1 ms. **Arming rule added:** encoder healthy.
+
+### 2026-10-08: Stage 9 first spin (developer's log, +5 Hz, 1.0 V)
+
+- **The motor spins open loop.** Over 30 s: cnt/ecyc −1482 to −1499 (mean about −1489 = −16384/11), **pole pairs 10.93–11.05: 11 confirmed**. The encoder advances exactly 1489 counts per forced electrical cycle, so the rotor is locked to the forced speed (27.3 rpm). Iamp 400–440 mA (CUR rms about 72 counts gives the same), matching 1 V / 2.2 Ω less a little back-EMF (the plan's "about 0.6 A" assumed 1.6 Ω). No faults, encoder CRC 0, interrupt 7.2 µs (14.6 %).
+- **Direction: cnt/ecyc is negative.** The encoder count falls as the electrical angle advances A → B → C, so **DIR = −1** for Stage 10 (θe = wrap(DIR × 11 × θm − θoffset)), with the motor leads in their present order.
+- **`meas` rpm read −18 against 27 forced:** the speed-estimate (PLL) snapshot taken every 1 s, which at 5 Hz always lands at the same point of the electrical cycle and catches the open-loop speed ripple. The position-based figure shows no slip. Fixed: `meas` is now the average over the second from the encoder position; the snapshot stays as `pll`. To revisit when the encoder read moves into the control interrupt (Stage 10 onward).
+- Still to do: reverse direction (step 2); smoothness by eye.
+
+### 2026-10-08: Stage 9 passed
+
+- **Reverse, −5 Hz:** cnt/ecyc −1482 to −1499, pp 10.93–11.05, Iamp 395–452 mA, no faults. cnt/ecyc keeps its sign when the direction reverses (Δposition and Δcycles both flip); a sign that's the same both ways confirms **DIR = −1**. (The chat had predicted a sign flip, which was wrong.)
+- **Reversal −5 → +8 Hz:** smooth deceleration through zero and acceleration the other way (developer: "slowing down very smoothly"), no faults.
+- **+8 Hz (43.6 rpm):** cnt/ecyc −1480 to −1495, pp 10.95–11.06, Iamp 368–420 mA (slightly lower: more back-EMF). The `meas` figures in this run are still the PLL snapshot (build before the averaging fix).
+- **Pass (plan):** turns smoothly ✔; 11 electrical cycles per mechanical turn ✔; encoder speed matches the forced speed (counts per cycle, no slip) ✔; current 0.37–0.45 A (the plan's "near 0.6 A" assumed 1.6 Ω; with the measured 2.2 Ω, 1 V gives about 0.45 A) ✔; both directions ✔.
+- **Recorded:** `MOTOR_ENC_DIR = -1` in `motor_params.h` (to be confirmed by Stage 10), plus `MOTOR_ENC_OFFSET_RAD` as TODO\_MEASURED for Stage 10. Motor leads must stay in their present order on J13.
+- **Reminder:** the deferred Stage 8 current check (Stage prerequisites) must be done before Stage 11.

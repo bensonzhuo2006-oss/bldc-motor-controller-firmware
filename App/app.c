@@ -1421,10 +1421,15 @@ static void vec_tick(uint32_t now_ms)
     float i_alpha = cs.amps[PHASE_A];
     float i_beta = (cs.amps[PHASE_B] - cs.amps[PHASE_C]) * 0.577350269f;   /* 1/sqrt(3) */
     float i_amp = foc_sqrtf((i_alpha * i_alpha) + (i_beta * i_beta));
-    debug_log("SPIN armed=%u V=%lumV f=%sHz tgt=%s rpm forced=%ld meas=%ld cnt/ecyc=%ld pp=%s Iamp=%lumA fault=%s",
+    /* meas: average over the log period from the encoder position (the
+     * pass check); pll: the speed estimate at this instant, which at 5 Hz is
+     * sampled at the same point of every electrical cycle and shows the
+     * open-loop speed ripple (2026-10-08: -18 against 27 rpm average). */
+    float rpm_avg = ((float)dpos / (float)ENC_COUNTS_PER_TURN) * 60000.0f / (float)VEC_LOG_PERIOD_MS;
+    debug_log("SPIN armed=%u V=%lumV f=%sHz tgt=%s rpm forced=%ld meas=%ld pll=%ld cnt/ecyc=%ld pp=%s Iamp=%lumA %s",
               pwm_is_armed() ? 1U : 0U, (uint32_t)(s_vec_v * 1000.0f), fmt2(b1, sizeof(b1), f_now),
               fmt2(b2, sizeof(b2), spin_target()),
-              (long)(f_now * 60.0f / (float)MOTOR_POLE_PAIRS), (long)(e.speed_rad_s * RAD_S_TO_RPM),
+              (long)(f_now * 60.0f / (float)MOTOR_POLE_PAIRS), (long)rpm_avg, (long)(e.speed_rad_s * RAD_S_TO_RPM),
               (long)cpc, fmt2(b3, sizeof(b3), pp), (uint32_t)(i_amp * AMPS_TO_MA), fault_name(fault_first()));
   }
 #else
